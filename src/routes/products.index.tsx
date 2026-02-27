@@ -363,6 +363,7 @@ function ProductsRoute() {
 					showOutOfStock={filters.showOutOfStock}
 					hidePreorder={filters.hidePreorder}
 					sort={filters.sort}
+					country={filters.country}
 				/>
 			</div>
 		</div>
