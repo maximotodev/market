@@ -39,8 +39,8 @@ The installer converges the host to this layout:
 - Service: `market-relay`
 - Env file: `/etc/market-relay.env`
 - Data dir: `/var/lib/market-relay`
-- Search index: `/var/lib/market-relay-search`
-- Raw event store: `/var/lib/market-relay-raw`
+- Search index: `/var/lib/market-relay/search`
+- Raw event store: `/var/lib/market-relay/raw`
 
 ## Verification
 
