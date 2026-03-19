@@ -132,7 +132,7 @@ func loadConfig() (config, error) {
 		ShutdownTimeout: time.Duration(envOrInt("RELAY_SHUTDOWN_TIMEOUT_MS", 10000)) * time.Millisecond,
 	}
 
-	for _, dir := range []string{cfg.DataDir, cfg.SearchIndexDir, cfg.RawEventStore} {
+	for _, dir := range []string{cfg.DataDir, cfg.RawEventStore} {
 		if err := os.MkdirAll(filepath.Clean(dir), 0o755); err != nil {
 			return config{}, fmt.Errorf("create relay dir %s: %w", dir, err)
 		}
@@ -154,7 +154,16 @@ func openStore(cfg config) (eventstore.Store, func(), error) {
 		RawEventStore: rawStore,
 	}
 	if err := searchStore.Init(); err != nil {
-		return nil, nil, fmt.Errorf("init Bleve search store: %w", err)
+		if strings.Contains(err.Error(), "metadata missing") {
+			if removeErr := os.RemoveAll(cfg.SearchIndexDir); removeErr != nil {
+				return nil, nil, fmt.Errorf("reset invalid Bleve index %s: %w", cfg.SearchIndexDir, removeErr)
+			}
+			if retryErr := searchStore.Init(); retryErr != nil {
+				return nil, nil, fmt.Errorf("reinit Bleve search store after reset: %w", retryErr)
+			}
+		} else {
+			return nil, nil, fmt.Errorf("init Bleve search store: %w", err)
+		}
 	}
 
 	cleanup := func() {

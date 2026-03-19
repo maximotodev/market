@@ -62,7 +62,7 @@ sudo install -o root -g root -m 0755 "$BINARY_SOURCE" "$REMOTE_BIN"
 sudo install -o root -g root -m 0644 "$ENV_SOURCE" "$REMOTE_ENV"
 sudo install -o root -g root -m 0644 "$SERVICE_SOURCE" "$REMOTE_SERVICE"
 
-for dir in "$RELAY_DATA_DIR" "$RELAY_SEARCH_INDEX_DIR" "$RELAY_RAW_DB_DIR"; do
+for dir in "$RELAY_DATA_DIR" "$RELAY_RAW_DB_DIR"; do
 	sudo mkdir -p "$dir"
 	sudo chown "$USER:$USER" "$dir"
 done
