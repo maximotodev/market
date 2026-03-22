@@ -4,6 +4,10 @@ import { v4 as uuidv4 } from 'uuid'
 import { useEffect, useState } from 'react'
 import NDK, { type NDKSigner } from '@nostr-dev-kit/ndk'
 import { NDKNWCWallet } from '@nostr-dev-kit/wallet'
+import { clearMemorySessionSecret, loadMemorySessionSecret, storeMemorySessionSecret } from '@/lib/security/clientSecretStorage'
+
+const LOCAL_WALLETS_STORAGE_KEY = 'nwc_wallets'
+const NWC_SESSION_SLOT_PREFIX = 'wallet_nwc_uri'
 
 // Wallet interface
 export interface Wallet {
@@ -35,6 +39,17 @@ const initialState: WalletState = {
 // Create the store
 export const walletStore = new Store<WalletState>(initialState)
 
+interface PersistedWalletRecord {
+	id: string
+	name: string
+	pubkey: string
+	relays: string[]
+	storedOnNostr?: boolean
+	createdAt: number
+	updatedAt: number
+	requiresReconnect?: boolean
+}
+
 // Define a type for the NWC URI parser function
 type NwcUriParser = (uri: string) => {
 	pubkey: string
@@ -65,6 +80,62 @@ export const parseNwcUri: NwcUriParser = (uri: string) => {
 		return null
 	} catch (e) {
 		console.error('Failed to parse NWC URI:', e)
+		return null
+	}
+}
+
+function getWalletSessionSlot(walletId: string): string {
+	return `${NWC_SESSION_SLOT_PREFIX}:${walletId}`
+}
+
+function toPersistedWalletRecord(wallet: Wallet): PersistedWalletRecord {
+	if (wallet.nwcUri) {
+		storeMemorySessionSecret(getWalletSessionSlot(wallet.id), wallet.nwcUri)
+	}
+
+	return {
+		id: wallet.id,
+		name: wallet.name,
+		pubkey: wallet.pubkey,
+		relays: wallet.relays,
+		storedOnNostr: wallet.storedOnNostr,
+		createdAt: wallet.createdAt,
+		updatedAt: wallet.updatedAt,
+		requiresReconnect: !wallet.storedOnNostr,
+	}
+}
+
+function hydratePersistedWallet(record: PersistedWalletRecord): Wallet | null {
+	const nwcUri = loadMemorySessionSecret(getWalletSessionSlot(record.id))
+
+	if (!nwcUri && record.requiresReconnect) {
+		console.warn(`[wallet] Dropping persisted local-only wallet ${record.id} after reload; secret material is no longer stored durably.`)
+		return null
+	}
+
+	return {
+		...record,
+		nwcUri: nwcUri || '',
+	}
+}
+
+function parseLegacyPersistedWallets(rawValue: string): Wallet[] | null {
+	try {
+		const parsed = JSON.parse(rawValue)
+		if (!Array.isArray(parsed)) return null
+		if (!parsed.every((wallet) => typeof wallet?.nwcUri === 'string')) return null
+
+		return parsed.map((wallet: any) => ({
+			id: wallet.id || uuidv4(),
+			name: wallet.name || `Wallet ${Math.floor(Math.random() * 1000)}`,
+			nwcUri: wallet.nwcUri,
+			pubkey: wallet.pubkey || parseNwcUri(wallet.nwcUri)?.pubkey || 'unknown',
+			relays: wallet.relays || [],
+			storedOnNostr: wallet.storedOnNostr || false,
+			createdAt: wallet.createdAt || Date.now(),
+			updatedAt: wallet.updatedAt || Date.now(),
+		}))
+	} catch {
 		return null
 	}
 }
@@ -168,20 +239,19 @@ export const walletActions = {
 	// Load wallets from localStorage
 	loadWalletsFromLocalStorage: async (): Promise<Wallet[]> => {
 		try {
-			const savedWallets = localStorage.getItem('nwc_wallets')
+			const savedWallets = localStorage.getItem(LOCAL_WALLETS_STORAGE_KEY)
 			if (savedWallets) {
-				const parsed = JSON.parse(savedWallets)
-				// Ensure all fields are present
-				return parsed.map((wallet: any) => ({
-					id: wallet.id || uuidv4(),
-					name: wallet.name || `Wallet ${Math.floor(Math.random() * 1000)}`,
-					nwcUri: wallet.nwcUri,
-					pubkey: wallet.pubkey || parseNwcUri(wallet.nwcUri)?.pubkey || 'unknown',
-					relays: wallet.relays || [],
-					storedOnNostr: wallet.storedOnNostr || false,
-					createdAt: wallet.createdAt || Date.now(),
-					updatedAt: wallet.updatedAt || Date.now(),
-				}))
+				const legacyWallets = parseLegacyPersistedWallets(savedWallets)
+				if (legacyWallets) {
+					legacyWallets.forEach((wallet) => {
+						storeMemorySessionSecret(getWalletSessionSlot(wallet.id), wallet.nwcUri)
+					})
+					walletActions.saveWalletsToLocalStorage(legacyWallets)
+					return legacyWallets
+				}
+
+				const parsed = JSON.parse(savedWallets) as PersistedWalletRecord[]
+				return parsed.map((wallet) => hydratePersistedWallet(wallet)).filter((wallet): wallet is Wallet => wallet !== null)
 			}
 		} catch (error) {
 			console.error('Failed to load wallets from localStorage:', error)
@@ -192,7 +262,7 @@ export const walletActions = {
 	// Save wallets to local storage
 	saveWalletsToLocalStorage: (wallets: Wallet[]): void => {
 		try {
-			localStorage.setItem('nwc_wallets', JSON.stringify(wallets))
+			localStorage.setItem(LOCAL_WALLETS_STORAGE_KEY, JSON.stringify(wallets.map((wallet) => toPersistedWalletRecord(wallet))))
 		} catch (error) {
 			console.error('Failed to save wallets to localStorage:', error)
 			toast.error('Failed to save wallets to local storage')
@@ -230,6 +300,7 @@ export const walletActions = {
 	removeWallet: (walletId: string): void => {
 		walletStore.setState((state) => {
 			const updatedWallets = state.wallets.filter((wallet) => wallet.id !== walletId)
+			clearMemorySessionSecret(getWalletSessionSlot(walletId))
 			walletActions.saveWalletsToLocalStorage(updatedWallets)
 
 			// Call the callback if it exists
@@ -260,6 +331,9 @@ export const walletActions = {
 				updatedAt: Date.now(),
 			}
 			updatedWallet = newWallets[walletIndex]
+			if (updatedWallet.nwcUri) {
+				storeMemorySessionSecret(getWalletSessionSlot(updatedWallet.id), updatedWallet.nwcUri)
+			}
 
 			walletActions.saveWalletsToLocalStorage(newWallets)
 

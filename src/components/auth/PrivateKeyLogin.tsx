@@ -1,7 +1,8 @@
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { authActions, NOSTR_LOCAL_ENCRYPTED_SIGNER_KEY } from '@/lib/stores/auth'
+import { authActions, NOSTR_LOCAL_ENCRYPTED_SIGNER_KEY, parseLegacyStoredPrivateKey } from '@/lib/stores/auth'
+import { parsePasswordSecretEnvelope } from '@/lib/security/clientSecretStorage'
 import { generateSecretKey, getPublicKey, nip19 } from 'nostr-tools'
 import { useEffect, useRef, useState } from 'react'
 import { Copy, Eye, EyeOff, Loader2 } from 'lucide-react'
@@ -30,12 +31,9 @@ export function PrivateKeyLogin({ onError, onSuccess }: PrivateKeyLoginProps) {
 		const storedKey = localStorage.getItem(NOSTR_LOCAL_ENCRYPTED_SIGNER_KEY)
 		if (storedKey) {
 			setHasStoredKey(true)
-			try {
-				const [pubkey] = storedKey.split(':')
-				setStoredPubkey(pubkey)
-			} catch (e) {
-				console.error('Failed to parse stored key:', e)
-			}
+			const parsedEnvelope = parsePasswordSecretEnvelope(storedKey)
+			const legacyStoredKey = parseLegacyStoredPrivateKey(storedKey)
+			setStoredPubkey(parsedEnvelope?.pubkey || legacyStoredKey?.pubkey || null)
 		}
 	}, [])
 
@@ -78,8 +76,7 @@ export function PrivateKeyLogin({ onError, onSuccess }: PrivateKeyLoginProps) {
 			const normalizedKey = normalizePrivateKey(key)
 			const secretKeyBytes = nip19.decode(normalizedKey).data as Uint8Array
 			const pubkey = getPublicKey(secretKeyBytes)
-			const encryptedKey = `${pubkey}:${normalizedKey}`
-			localStorage.setItem(NOSTR_LOCAL_ENCRYPTED_SIGNER_KEY, encryptedKey)
+			await authActions.storeEncryptedPrivateKey(normalizedKey, password, pubkey)
 			setHasStoredKey(true)
 			setStoredPubkey(pubkey)
 		} catch (error) {
@@ -148,13 +145,7 @@ export function PrivateKeyLogin({ onError, onSuccess }: PrivateKeyLoginProps) {
 
 		try {
 			setIsLoading(true)
-			const storedKey = localStorage.getItem(NOSTR_LOCAL_ENCRYPTED_SIGNER_KEY)
-			if (!storedKey) {
-				throw new Error('No stored key found')
-			}
-
-			const [, key] = storedKey.split(':')
-			await authActions.loginWithPrivateKey(key)
+			await authActions.decryptAndLogin(encryptionPassword)
 			onSuccess?.()
 		} catch (error) {
 			setPasswordError(error instanceof Error ? error.message : 'Failed to decrypt key')

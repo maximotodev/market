@@ -5,6 +5,7 @@ import { cartActions } from './cart'
 import { fetchProductsByPubkey } from '@/queries/products'
 import { hasAcceptedTerms, TERMS_ACCEPTED_KEY } from '@/components/dialogs/TermsConditionsDialog'
 import { uiActions } from './ui'
+import { clearAllMemorySessionSecrets, loadPasswordProtectedSecret, savePasswordProtectedSecret } from '@/lib/security/clientSecretStorage'
 
 export const NOSTR_CONNECT_KEY = 'nostr_connect_url'
 export const NOSTR_LOCAL_SIGNER_KEY = 'nostr_local_signer_key'
@@ -28,6 +29,20 @@ const initialState: AuthState = {
 
 export const authStore = new Store<AuthState>(initialState)
 
+export function parseLegacyStoredPrivateKey(value: string | null | undefined): { pubkey: string; privateKey: string } | null {
+	if (!value || value.trim().startsWith('{')) return null
+
+	const [pubkey, privateKey] = value.split(':')
+	if (!pubkey || !privateKey) return null
+
+	return { pubkey, privateKey }
+}
+
+function clearLegacyNip46Storage() {
+	localStorage.removeItem(NOSTR_LOCAL_SIGNER_KEY)
+	localStorage.removeItem(NOSTR_CONNECT_KEY)
+}
+
 export const authActions = {
 	getAuthFromLocalStorageAndLogin: async () => {
 		try {
@@ -35,10 +50,11 @@ export const authActions = {
 			if (autoLogin !== 'true') return
 
 			authStore.setState((state) => ({ ...state, isAuthenticating: true }))
-			const privateKey = localStorage.getItem(NOSTR_LOCAL_SIGNER_KEY)
-			const bunkerUrl = localStorage.getItem(NOSTR_CONNECT_KEY)
-			if (privateKey && bunkerUrl) {
-				await authActions.loginWithNip46(bunkerUrl, new NDKPrivateKeySigner(privateKey))
+			const legacyNip46PrivateKey = localStorage.getItem(NOSTR_LOCAL_SIGNER_KEY)
+			const legacyBunkerUrl = localStorage.getItem(NOSTR_CONNECT_KEY)
+			if (legacyNip46PrivateKey && legacyBunkerUrl) {
+				await authActions.loginWithNip46(legacyBunkerUrl, new NDKPrivateKeySigner(legacyNip46PrivateKey))
+				clearLegacyNip46Storage()
 				authActions.checkAndShowTermsDialog()
 				return
 			}
@@ -66,8 +82,16 @@ export const authActions = {
 				throw new Error('No encrypted key found')
 			}
 
-			const [, key] = encryptedPrivateKey.split(':')
+			const legacyStoredKey = parseLegacyStoredPrivateKey(encryptedPrivateKey)
+			const key = legacyStoredKey?.privateKey ?? (await loadPasswordProtectedSecret(localStorage, NOSTR_LOCAL_ENCRYPTED_SIGNER_KEY, password))
+			if (!key) {
+				throw new Error('Stored private key is invalid')
+			}
+
 			await authActions.loginWithPrivateKey(key)
+			if (legacyStoredKey) {
+				await authActions.storeEncryptedPrivateKey(key, password, legacyStoredKey.pubkey)
+			}
 			authStore.setState((state) => ({ ...state, needsDecryptionPassword: false }))
 			authActions.checkAndShowTermsDialog()
 		} catch (error) {
@@ -81,6 +105,10 @@ export const authActions = {
 		if (!hasAcceptedTerms()) {
 			uiActions.openDialog('terms')
 		}
+	},
+
+	storeEncryptedPrivateKey: async (privateKey: string, password: string, pubkey?: string) => {
+		await savePasswordProtectedSecret(localStorage, NOSTR_LOCAL_ENCRYPTED_SIGNER_KEY, privateKey, password, { pubkey })
 	},
 
 	loginWithPrivateKey: async (privateKey: string) => {
@@ -178,11 +206,6 @@ export const authActions = {
 			ndkActions.setSigner(signer)
 			const user = await signer.user()
 
-			// Wait until user is logged in successfully before saving the bunkerURL/private key.
-
-			localStorage.setItem(NOSTR_LOCAL_SIGNER_KEY, localSigner.privateKey || '')
-			localStorage.setItem(NOSTR_CONNECT_KEY, bunkerUrl)
-
 			authStore.setState((state) => ({
 				...state,
 				user,
@@ -205,10 +228,10 @@ export const authActions = {
 		const ndk = ndkActions.getNDK()
 		if (!ndk) return
 		ndkActions.removeSigner()
-		localStorage.removeItem(NOSTR_LOCAL_SIGNER_KEY)
-		localStorage.removeItem(NOSTR_CONNECT_KEY)
+		clearLegacyNip46Storage()
 		localStorage.removeItem(NOSTR_LOCAL_ENCRYPTED_SIGNER_KEY)
 		localStorage.removeItem(NOSTR_AUTO_LOGIN)
+		clearAllMemorySessionSecrets()
 		// Clear cart when user logs out
 		cartActions.clear()
 		authStore.setState(() => initialState)
