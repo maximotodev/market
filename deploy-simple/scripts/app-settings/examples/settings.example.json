@@ -1,8 +1,8 @@
 {
-	"name": "staging",
-	"displayName": "Plebeian Market Staging",
-	"picture": "https://staging.plebeian.market/images/logo.svg",
-	"banner": "https://staging.plebeian.market/banner.svg",
+	"name": "Plebeian Market",
+	"displayName": "Plebeian Market",
+	"picture": "https://plebeian.market/images/logo.svg",
+	"banner": "https://plebeian.market/banner.svg",
 	"ownerPk": "ec79b568bdea63ca6091f5b84b0c639c10a0919e175fa09a4de3154f82906f25",
 	"contactEmail": "ops@example.com",
 	"allowRegister": true,

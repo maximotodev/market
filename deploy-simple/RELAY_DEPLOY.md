@@ -112,6 +112,24 @@ nak req -k 30000 -a 7b3979f5936f590541eb4f51c2ce3094194d1c57386e706dd05aca98766a
 If a command prints nothing beyond the relay connection line, that event is not
 present on the relay.
 
+## Back Up Market Events
+
+For repo-owned backups and restores of market events defined in
+[SPEC.md](/Users/schlaus/workspace/market/SPEC.md), use
+[deploy-simple/scripts/market-events](/Users/schlaus/workspace/market/deploy-simple/scripts/market-events).
+
+```bash
+bun run deploy:market-events:backup -- --stage staging
+bun run deploy:market-events:backup -- --stage production
+
+bun run deploy:market-events:restore -- \
+  --stage staging \
+  --in-dir deploy-simple/backups/market-staging-20260320T000000Z
+```
+
+The backup script writes one NDJSON file per scope plus `all.ndjson` and a
+`manifest.json`, so you can inspect or edit the backup before restoring it.
+
 ## Data Migration
 
 Use [scripts/migrate-relay.ts](/Users/schlaus/workspace/market/scripts/migrate-relay.ts)

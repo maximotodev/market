@@ -26,6 +26,8 @@
 		"migrate:relay": "bun run scripts/migrate-relay.ts",
 		"deploy:app-settings:inspect": "bun run deploy-simple/scripts/app-settings/inspect.ts",
 		"deploy:app-settings:publish": "bun run deploy-simple/scripts/app-settings/publish.ts",
+		"deploy:market-events:backup": "bun run deploy-simple/scripts/market-events/backup.ts",
+		"deploy:market-events:restore": "bun run deploy-simple/scripts/market-events/restore.ts",
 		"test:e2e": "playwright test",
 		"test:e2e:headed": "playwright test --headed",
 		"test:e2e:ui": "playwright test --ui",

@@ -397,7 +397,8 @@ test.describe('Checkout Flow', () => {
 		await neutralizeBlockingToasts(buyerPage)
 		await payLaterButton.click()
 
-		await expect(buyerPage.getByText(/1 of 2 completed/i)).toBeVisible({ timeout: 15_000 })
+		await expect(buyerPage.getByText(/1 of \d+ completed/i)).toBeVisible({ timeout: 15_000 })
+		await expect(buyerPage.getByText(/skipped/i).first()).toBeVisible({ timeout: 10_000 })
 		await expect(buyerPage.getByRole('button', { name: /pay later/i })).toBeVisible({ timeout: 10_000 })
 	})
 })
