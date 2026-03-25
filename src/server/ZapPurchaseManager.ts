@@ -22,6 +22,59 @@ export interface ZapPurchaseEntry {
 }
 
 /**
+ * Request body for generating a zap purchase invoice.
+ * Used by the generic `/api/<purchase>/` route handler.
+ */
+export interface ZapPurchaseInvoiceRequestBody {
+	amountSats: number
+	/** Purchase-specific key (e.g. vanity name, badge tier, username) */
+	registryKey: string
+	zapRequest: {
+		pubkey: string
+		sig?: string
+		created_at?: number
+		kind?: number
+		content?: string
+		tags: string[][]
+	}
+}
+
+/**
+ * Successful invoice generation result.
+ */
+export interface ZapInvoiceResult {
+	pr: string
+}
+
+/**
+ * Response from a LNURL-pay endpoint (LUD-06/LUD-16).
+ */
+export interface LnurlPayData {
+	callback?: string
+	maxSendable?: number
+	minSendable?: number
+	commentAllowed?: number
+	allowsNostr?: boolean
+	nostrPubkey?: string
+	status?: 'ERROR'
+	reason?: string
+}
+
+/**
+ * Response from a LNURL-pay callback containing the BOLT11 invoice.
+ */
+export interface LnurlInvoiceData {
+	pr?: string
+	status?: 'ERROR'
+	reason?: string
+}
+
+/**
+ * Function that converts a Lightning identifier (lud16/lud06) to an LNURL-pay endpoint URL.
+ */
+export type LnurlResolver = (lightningIdentifier: string) => string
+
+/**
  * Configuration for a zap purchase manager instance.
  *
  * @example
@@ -53,7 +106,7 @@ export interface ZapPurchaseConfig {
  *  Abstract base for all zap purchases:
  * - Subscribtion -> Payment Validation  -> Publishing the parameterized Nostr events
  *
- * Subclasses implement domain-specific logic: 
+ * Subclasses implement domain-specific logic:
  *  - extract the registry and specific validation rules and serialization Nostr event tags
  *
  * @example
@@ -316,6 +369,133 @@ export abstract class ZapPurchaseManager<TEntry extends ZapPurchaseEntry> {
 	// --- Protected helpers ---
 
 	/**
+	 * Comment included in the LNURL callback when generating an invoice.
+	 * Override for domain-specific comments (e.g. "Vanity URL: my-shop").
+	 */
+	protected getInvoiceComment(registryKey: string): string {
+		return `${this.config.zapLabel}: ${registryKey}`
+	}
+
+	// --- Invoice generation (server-side LNURL proxy) ---
+
+	/**
+	 * Validate a zap request and generate a Lightning invoice via LNURL-pay.
+	 *
+	 * This runs server-side to avoid CORS issues when the browser needs to resolve
+	 * a Lightning address and obtain a BOLT11 invoice. It validates the zap request
+	 * against this manager's config (correct label, amount, registry key) and runs
+	 * domain-specific validation before proxying the LNURL-pay flow.
+	 *
+	 * @param request - The invoice request containing amount, registry key, and signed zap request
+	 * @param appPubkey - The app's public key (zap request must target this)
+	 * @param lightningIdentifier - The app's Lightning address (lud16) or LNURL (lud06)
+	 * @param toLnurlpEndpoint - Resolves a Lightning identifier to an LNURL-pay endpoint URL
+	 */
+	public async generateInvoice(
+		request: ZapPurchaseInvoiceRequestBody,
+		appPubkey: string,
+		lightningIdentifier: string,
+		toLnurlpEndpoint: LnurlResolver,
+	): Promise<ZapInvoiceResult> {
+		const { amountSats, registryKey, zapRequest } = request
+
+		// --- Validate request basics ---
+		if (!Number.isFinite(amountSats) || amountSats <= 0) {
+			throw new ZapInvoiceError('amountSats must be a positive number', 400)
+		}
+		if (!registryKey) {
+			throw new ZapInvoiceError('registryKey is required', 400)
+		}
+		if (!zapRequest || !Array.isArray(zapRequest.tags)) {
+			throw new ZapInvoiceError('zapRequest is required', 400)
+		}
+		if (!zapRequest.sig) {
+			throw new ZapInvoiceError('zapRequest must be signed', 400)
+		}
+
+		// --- Validate zap request tags ---
+		const hasTag = (k: string, v?: string) => zapRequest.tags.some((t) => t[0] === k && (v === undefined ? true : t[1] === v))
+
+		if (!hasTag('L', this.config.zapLabel)) {
+			throw new ZapInvoiceError(`zapRequest missing ["L","${this.config.zapLabel}"] tag`, 400)
+		}
+		if (!hasTag('p', appPubkey)) {
+			throw new ZapInvoiceError('zapRequest must target app pubkey', 400)
+		}
+
+		// Validate registry key from zap request matches the declared key
+		const extractedKey = this.extractRegistryKey(zapRequest as unknown as NostrEvent)
+		if (extractedKey !== registryKey) {
+			throw new ZapInvoiceError('zapRequest registry key must match registryKey', 400)
+		}
+
+		// Validate amount tag consistency
+		const amountMsatsTag = zapRequest.tags.find((t) => t[0] === 'amount')?.[1]
+		const amountMsats = amountMsatsTag ? Number(amountMsatsTag) : NaN
+		if (!Number.isFinite(amountMsats) || amountMsats !== amountSats * 1000) {
+			throw new ZapInvoiceError('zapRequest amount must match amountSats', 400)
+		}
+
+		// --- Domain-specific validation ---
+		const validationError = this.validateRegistration(registryKey, zapRequest.pubkey)
+		if (validationError) {
+			throw new ZapInvoiceError(validationError, 400)
+		}
+
+		// --- Resolve LNURL-pay endpoint ---
+		const lnurlEndpoint = toLnurlpEndpoint(lightningIdentifier)
+
+		const lnurlRes = await fetch(lnurlEndpoint, { headers: { accept: 'application/json' } })
+		if (!lnurlRes.ok) {
+			throw new ZapInvoiceError(`Failed to fetch LNURL-pay data (${lnurlRes.status})`, 502)
+		}
+
+		const lnurlData = (await lnurlRes.json()) as LnurlPayData
+
+		if (lnurlData.status === 'ERROR') {
+			throw new ZapInvoiceError(lnurlData.reason || 'LNURL-pay error', 502)
+		}
+		if (!lnurlData.callback) {
+			throw new ZapInvoiceError('LNURL-pay callback missing', 502)
+		}
+		if (!lnurlData.allowsNostr) {
+			throw new ZapInvoiceError('App Lightning address does not support Nostr zaps (allowsNostr=false)', 400)
+		}
+
+		// --- Validate amount bounds ---
+		const amountMsatsToSend = amountSats * 1000
+		if (typeof lnurlData.minSendable === 'number' && amountMsatsToSend < lnurlData.minSendable) {
+			throw new ZapInvoiceError(`Amount below minimum (${Math.ceil(lnurlData.minSendable / 1000)} sats)`, 400)
+		}
+		if (typeof lnurlData.maxSendable === 'number' && amountMsatsToSend > lnurlData.maxSendable) {
+			throw new ZapInvoiceError(`Amount above maximum (${Math.floor(lnurlData.maxSendable / 1000)} sats)`, 400)
+		}
+
+		// --- Request invoice from LNURL callback ---
+		const callbackUrl = new URL(lnurlData.callback)
+		callbackUrl.searchParams.set('amount', amountMsatsToSend.toString())
+		callbackUrl.searchParams.set('nostr', JSON.stringify(zapRequest))
+		if (lnurlData.commentAllowed && lnurlData.commentAllowed > 0) {
+			callbackUrl.searchParams.set('comment', this.getInvoiceComment(registryKey))
+		}
+
+		const invoiceRes = await fetch(callbackUrl.toString(), { headers: { accept: 'application/json' } })
+		if (!invoiceRes.ok) {
+			throw new ZapInvoiceError(`Failed to fetch invoice (${invoiceRes.status})`, 502)
+		}
+
+		const invoiceData = (await invoiceRes.json()) as LnurlInvoiceData
+		if (invoiceData.status === 'ERROR') {
+			throw new ZapInvoiceError(invoiceData.reason || 'Invoice error', 502)
+		}
+		if (!invoiceData.pr) {
+			throw new ZapInvoiceError('Invoice missing pr', 502)
+		}
+
+		return { pr: invoiceData.pr }
+	}
+
+	/**
 	 * Match a payment amount to the best (highest) qualifying pricing tier.
 	 * Returns validity in seconds, or null if no tier matches.
 	 *
@@ -368,5 +548,18 @@ export abstract class ZapPurchaseManager<TEntry extends ZapPurchaseEntry> {
 		} catch (error) {
 			console.error(`[${this.config.registryDTag}] Failed to publish registry:`, error)
 		}
+	}
+}
+
+/**
+ * Error thrown during invoice generation with an HTTP status code.
+ * The generic route handler uses `status` to set the response code.
+ */
+export class ZapInvoiceError extends Error {
+	public readonly status: number
+	constructor(message: string, status: number) {
+		super(message)
+		this.name = 'ZapInvoiceError'
+		this.status = status
 	}
 }

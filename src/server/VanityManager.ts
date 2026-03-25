@@ -117,6 +117,10 @@ export class VanityManagerImpl extends ZapPurchaseManager<VanityEntry> {
 
 	// --- Optional hooks ---
 
+	protected getInvoiceComment(registryKey: string): string {
+		return `Vanity URL: ${registryKey}`
+	}
+
 	protected onEntryRegistered(key: string, entry: VanityEntry): void {
 		this.pubkeyToVanity.set(entry.pubkey, key)
 	}

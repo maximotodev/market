@@ -270,6 +270,21 @@ export class EventHandler {
 		return this.blacklistManager.getBlacklistedPubkeys()
 	}
 
+	/**
+	 * Get a registered purchase manager by its zap label.
+	 * Used by invoice route handlers to delegate to the correct manager.
+	 */
+	public getPurchaseManager(zapLabel: string): ZapPurchaseManager<ZapPurchaseEntry> | undefined {
+		return this.purchaseManagers.find((m) => m.config.zapLabel === zapLabel)
+	}
+
+	/**
+	 * Get the vanity URL purchase manager.
+	 */
+	public getVanityManager(): VanityManagerImpl {
+		return this.vanityManager
+	}
+
 	public getStats() {
 		return {
 			adminCount: this.adminManager.size(),
