@@ -396,6 +396,7 @@ test.describe('Cart - Persistence', () => {
 		// Cart should now show empty state
 		await expect(dialog.getByText('Bitcoin Hardware Wallet')).not.toBeVisible({ timeout: 5_000 })
 		await expect(dialog.getByText('Lightning Node Setup Guide')).not.toBeVisible()
+		await buyerPage.waitForTimeout(750)
 
 		// Close and reload to confirm persistence of the cleared state
 		await buyerPage.keyboard.press('Escape')
