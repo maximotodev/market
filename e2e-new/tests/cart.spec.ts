@@ -1,5 +1,7 @@
 import type { Page } from '@playwright/test'
 import { test, expect } from '../fixtures'
+import { devUser2 } from '../../src/lib/fixtures'
+import { waitForLatestCartSnapshotToBeEmpty } from '../utils/relay-query'
 
 test.use({ scenario: 'marketplace' })
 
@@ -295,9 +297,11 @@ test.describe('Cart - Multiple Merchants', () => {
 		await expect(dialog.getByText('Bitcoin Hardware Wallet')).not.toBeVisible({ timeout: 5_000 })
 		await expect(dialog.getByText('Lightning Node Setup Guide')).toBeVisible()
 
-		// Only 1 shipping selector should remain (for the remaining seller)
-		const shippingTriggers = dialog.getByText('Select shipping method')
-		await expect(shippingTriggers).toHaveCount(1, { timeout: 10_000 })
+		// Only 1 live shipping selector control should remain for the remaining seller.
+		// Count the actual select triggers rather than raw text so exiting animated nodes
+		// don't get mistaken for an active seller section.
+		const shippingSelectors = dialog.locator('[data-slot="select-trigger"]:visible')
+		await expect(shippingSelectors).toHaveCount(1, { timeout: 10_000 })
 	})
 })
 
@@ -382,7 +386,7 @@ test.describe('Cart - Persistence', () => {
 		await waitForProducts(buyerPage)
 
 		await addWalletToCart(buyerPage)
-		await addGuideToCart(buyerPage)
+		await addTShirtToCart(buyerPage)
 
 		// Open cart and clear it
 		await openCart(buyerPage)
@@ -395,8 +399,8 @@ test.describe('Cart - Persistence', () => {
 
 		// Cart should now show empty state
 		await expect(dialog.getByText('Bitcoin Hardware Wallet')).not.toBeVisible({ timeout: 5_000 })
-		await expect(dialog.getByText('Lightning Node Setup Guide')).not.toBeVisible()
-		await buyerPage.waitForTimeout(750)
+		await expect(dialog.getByText('Nostr T-Shirt')).not.toBeVisible()
+		await waitForLatestCartSnapshotToBeEmpty({ pubkey: devUser2.pk })
 
 		// Close and reload to confirm persistence of the cleared state
 		await buyerPage.keyboard.press('Escape')

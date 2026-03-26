@@ -678,29 +678,47 @@ export const cartActions = {
 	removeProduct: async (buyerPubkey: string, productId: string) => {
 		const updatedAt = cartSyncDependencies.now()
 		cartStore.setState((state) => {
-			const cart = { ...state.cart }
-			const product = cart.products[productId]
+			const existingProduct = state.cart.products[productId]
+			if (!existingProduct) {
+				return state
+			}
 
-			if (product && product.sellerPubkey) {
-				const seller = cart.sellers[product.sellerPubkey]
+			const nextProducts = { ...state.cart.products }
+			delete nextProducts[productId]
+
+			const nextSellers = { ...state.cart.sellers }
+			if (existingProduct.sellerPubkey) {
+				const seller = nextSellers[existingProduct.sellerPubkey]
 				if (seller) {
-					seller.productIds = seller.productIds.filter((id) => id !== productId)
-
-					// Clean up empty seller
-					if (seller.productIds.length === 0) {
-						delete cart.sellers[product.sellerPubkey]
+					const nextProductIds = seller.productIds.filter((id) => id !== productId)
+					if (nextProductIds.length === 0) {
+						delete nextSellers[existingProduct.sellerPubkey]
+					} else {
+						nextSellers[existingProduct.sellerPubkey] = {
+							...seller,
+							productIds: nextProductIds,
+						}
 					}
 				}
 			}
 
-			delete cart.products[productId]
+			const cart = {
+				...state.cart,
+				sellers: nextSellers,
+				products: nextProducts,
+			}
+			const nextProductsBySeller = computeProductsBySeller(nextProducts)
 
 			cartActions.persistCartIntentLocally(cart, updatedAt)
-			return { ...state, cart, lastCartIntentUpdatedAt: updatedAt }
+			return {
+				...state,
+				cart,
+				productsBySeller: nextProductsBySeller,
+				lastCartIntentUpdatedAt: updatedAt,
+			}
 		})
 
 		await cartActions.updateV4VShares()
-		await cartActions.groupProductsBySeller()
 		await cartActions.updateSellerData()
 		cartActions.scheduleRemotePublish()
 	},
@@ -811,13 +829,17 @@ export const cartActions = {
 	handleProductUpdate: async (action: string, productId: string, amount?: number) => {
 		const updatedAt = cartSyncDependencies.now()
 		cartStore.setState((state) => {
-			const cart = { ...state.cart }
-			const product = cart.products[productId]
+			const nextProducts = { ...state.cart.products }
+			const nextSellers = { ...state.cart.sellers }
+			const product = nextProducts[productId]
 
 			switch (action) {
 				case 'increment':
 					if (product) {
-						product.amount += 1
+						nextProducts[productId] = {
+							...product,
+							amount: product.amount + 1,
+						}
 					}
 					break
 				case 'decrement':
@@ -826,16 +848,24 @@ export const cartActions = {
 
 						if (newAmount === 0) {
 							// Remove product from seller's product list
-							const seller = cart.sellers[product.sellerPubkey]
+							const seller = nextSellers[product.sellerPubkey]
 							if (seller) {
-								seller.productIds = seller.productIds.filter((id: string) => id !== productId)
-								if (seller.productIds.length === 0) {
-									delete cart.sellers[product.sellerPubkey]
+								const nextProductIds = seller.productIds.filter((id: string) => id !== productId)
+								if (nextProductIds.length === 0) {
+									delete nextSellers[product.sellerPubkey]
+								} else {
+									nextSellers[product.sellerPubkey] = {
+										...seller,
+										productIds: nextProductIds,
+									}
 								}
 							}
-							delete cart.products[productId]
+							delete nextProducts[productId]
 						} else {
-							product.amount = newAmount
+							nextProducts[productId] = {
+								...product,
+								amount: newAmount,
+							}
 						}
 					}
 					break
@@ -843,41 +873,65 @@ export const cartActions = {
 					if (amount !== undefined && product) {
 						if (amount <= 0) {
 							// Remove product from seller's product list
-							const seller = cart.sellers[product.sellerPubkey]
+							const seller = nextSellers[product.sellerPubkey]
 							if (seller) {
-								seller.productIds = seller.productIds.filter((id: string) => id !== productId)
-								if (seller.productIds.length === 0) {
-									delete cart.sellers[product.sellerPubkey]
+								const nextProductIds = seller.productIds.filter((id: string) => id !== productId)
+								if (nextProductIds.length === 0) {
+									delete nextSellers[product.sellerPubkey]
+								} else {
+									nextSellers[product.sellerPubkey] = {
+										...seller,
+										productIds: nextProductIds,
+									}
 								}
 							}
-							delete cart.products[productId]
+							delete nextProducts[productId]
 						} else {
-							product.amount = amount
+							nextProducts[productId] = {
+								...product,
+								amount,
+							}
 						}
 					}
 					break
 				case 'remove': {
 					if (product) {
 						// Remove product from seller's product list
-						const seller = cart.sellers[product.sellerPubkey]
+						const seller = nextSellers[product.sellerPubkey]
 						if (seller) {
-							seller.productIds = seller.productIds.filter((id: string) => id !== productId)
-							if (seller.productIds.length === 0) {
-								delete cart.sellers[product.sellerPubkey]
+							const nextProductIds = seller.productIds.filter((id: string) => id !== productId)
+							if (nextProductIds.length === 0) {
+								delete nextSellers[product.sellerPubkey]
+							} else {
+								nextSellers[product.sellerPubkey] = {
+									...seller,
+									productIds: nextProductIds,
+								}
 							}
 						}
-						delete cart.products[productId]
+						delete nextProducts[productId]
 					}
 					break
 				}
 			}
 
+			const cart = {
+				...state.cart,
+				sellers: nextSellers,
+				products: nextProducts,
+			}
+			const nextProductsBySeller = computeProductsBySeller(nextProducts)
+
 			cartActions.persistCartIntentLocally(cart, updatedAt)
-			return { ...state, cart, lastCartIntentUpdatedAt: updatedAt }
+			return {
+				...state,
+				cart,
+				productsBySeller: nextProductsBySeller,
+				lastCartIntentUpdatedAt: updatedAt,
+			}
 		})
 
 		await cartActions.updateV4VShares()
-		await cartActions.groupProductsBySeller()
 		await cartActions.updateSellerData()
 		cartActions.scheduleRemotePublish()
 	},
