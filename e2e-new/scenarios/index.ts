@@ -1,9 +1,10 @@
-import { finalizeEvent, type EventTemplate } from 'nostr-tools/pure'
+import { finalizeEvent, type EventTemplate, type VerifiedEvent } from 'nostr-tools/pure'
 import { Relay, useWebSocketImplementation } from 'nostr-tools/relay'
 import { hexToBytes } from '@noble/hashes/utils'
 import WebSocket from 'ws'
 import { devUser1, devUser2, WALLETED_USER_LUD16 } from '../../src/lib/fixtures'
 import { RELAY_URL, TEST_APP_PRIVATE_KEY, TEST_APP_PUBLIC_KEY } from '../test-config'
+import { seedBase, seedMerchant, seedMarketplace } from 'e2e-new/helpers/seed'
 
 useWebSocketImplementation(WebSocket)
 
@@ -358,6 +359,97 @@ export async function seedShippingOptionForUser(skUser: string) {
 	})
 
 	console.log(`    Published shipping option with ID: ${id}`)
+}
+
+export async function seedComment(
+	relay: Relay,
+	skHex: string,
+	opts: {
+		content: string
+		// Root scope (what we're commenting on)
+		rootEventId: string
+		rootEventPubkey: string
+		rootKind: number // e.g., 30402 for products
+		// Parent scope (for replies - optional for top-level comments)
+		parentEventId?: string
+		parentEventPubkey?: string
+		parentKind?: number
+		// Relay hints
+		relayUrl?: string
+	},
+): Promise<VerifiedEvent> {
+	const tags: string[][] = []
+
+	// === ROOT SCOPE TAGS (uppercase) ===
+
+	// Root event reference (E tag for event IDs)
+	// For replaceable/addressable events like products (kind 30023/30402), use A tag
+	if (opts.rootKind === 30402) {
+		// Products are addressable events - use A tag
+		const dTag = opts.rootEventId.split(':')[2] || opts.rootEventId
+		tags.push(['A', `$${opts.rootKind}:$${opts.rootEventPubkey}:${dTag}`, opts.relayUrl || '', opts.rootEventPubkey])
+	} else {
+		// Regular events - use E tag
+		tags.push(['E', opts.rootEventId, opts.relayUrl || '', opts.rootEventPubkey])
+	}
+
+	// Root kind
+	tags.push(['K', opts.rootKind.toString()])
+
+	// Root author pubkey
+	tags.push(['P', opts.rootEventPubkey, opts.relayUrl || ''])
+
+	// === PARENT SCOPE TAGS (lowercase) ===
+
+	// For top-level comments, parent = root
+	// For replies, parent = the comment we're replying to
+
+	if (opts.parentEventId && opts.parentEventPubkey && opts.parentKind) {
+		// Reply to another comment
+		if (opts.parentKind === 1111) {
+			// Replying to a comment - use E tag for the comment event
+			tags.push(['e', opts.parentEventId, opts.relayUrl || '', opts.parentEventPubkey])
+		} else {
+			// Replying to the root event directly
+			if (opts.parentKind === 30402) {
+				// Addressable event
+				const dTag = opts.parentEventId.split(':')[2] || opts.parentEventId
+				tags.push(['a', `$${opts.parentKind}:$${opts.parentEventPubkey}:${dTag}`, opts.relayUrl || '', opts.parentEventPubkey])
+			} else {
+				tags.push(['e', opts.parentEventId, opts.relayUrl || '', opts.parentEventPubkey])
+			}
+		}
+
+		// Parent kind
+		tags.push(['k', opts.parentKind.toString()])
+
+		// Parent author pubkey
+		tags.push(['p', opts.parentEventPubkey, opts.relayUrl || ''])
+	} else {
+		// Top-level comment - parent = root
+		if (opts.rootKind === 30402) {
+			const dTag = opts.rootEventId.split(':')[2] || opts.rootEventId
+			tags.push(['a', `$${opts.rootKind}:$${opts.rootEventPubkey}:${dTag}`, opts.relayUrl || '', opts.rootEventPubkey])
+		} else {
+			tags.push(['e', opts.rootEventId, opts.relayUrl || '', opts.rootEventPubkey])
+		}
+
+		// Parent kind (same as root for top-level)
+		tags.push(['k', opts.rootKind.toString()])
+
+		// Parent author pubkey (same as root for top-level)
+		tags.push(['p', opts.rootEventPubkey, opts.relayUrl || ''])
+	}
+
+	const event = await publish(relay, skHex, {
+		kind: 1111,
+		created_at: Math.floor(Date.now() / 1000),
+		content: opts.content,
+		tags,
+	})
+
+	console.log(`    Published comment: "$${opts.content.substring(0, 30)}$${opts.content.length > 30 ? '...' : ''}"`)
+	return event
 }
 
 /**
