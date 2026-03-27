@@ -308,39 +308,6 @@ async function seedPaymentDetail(relay: Relay, skHex: string, appPubkey: string,
 	console.log(`    Published payment: ${opts.method}`)
 }
 
-async function seedProduct(
-	relay: Relay,
-	skHex: string,
-	opts: {
-		title: string
-		description: string
-		price: string
-		currency: string
-		status: string
-		category: string
-		stock?: string
-		shippingOptions?: string[]
-	},
-) {
-	const dTag = opts.title.toLowerCase().replace(/\s+/g, '-')
-	await publish(relay, skHex, {
-		kind: 30402,
-		created_at: Math.floor(Date.now() / 1000),
-		content: opts.description,
-		tags: [
-			['d', dTag],
-			['title', opts.title],
-			['price', opts.price, opts.currency],
-			['status', opts.status],
-			['t', opts.category],
-			['image', 'https://cdn.satellite.earth/f8f1513ec22f966626dc05342a3bb1f36096d28dd0e6eeae640b5df44f2c7c84.png'],
-			...(opts.stock ? [['stock', opts.stock]] : []),
-			...(opts.shippingOptions ? opts.shippingOptions.map((ref) => ['shipping_option', ref]) : []),
-		],
-	})
-	console.log(`    Published product: ${opts.title}`)
-}
-
 export async function seedShippingOptionForUser(skUser: string) {
 	const relay = await Relay.connect(RELAY_URL)
 
@@ -361,6 +328,42 @@ export async function seedShippingOptionForUser(skUser: string) {
 	console.log(`    Published shipping option with ID: ${id}`)
 }
 
+export async function seedProduct(
+	relay: Relay,
+	skHex: string,
+	opts: {
+		title: string
+		description: string
+		price: string
+		currency: string
+		status: string
+		category: string
+		stock?: string
+		shippingOptions?: string[]
+		dTag?: string
+	},
+): Promise<VerifiedEvent> {
+	const dTag = opts.dTag ?? opts.title.toLowerCase().replace(/\s+/g, '-')
+	const event = await publish(relay, skHex, {
+		kind: 30402,
+		created_at: Math.floor(Date.now() / 1000),
+		content: opts.description,
+		tags: [
+			['d', dTag],
+			['title', opts.title],
+			['price', opts.price, opts.currency],
+			['status', opts.status],
+			['t', opts.category],
+			['image', 'https://cdn.satellite.earth/f8f1513ec22f966626dc05342a3bb1f36096d28dd0e6eeae640b5df44f2c7c84.png'],
+			...(opts.stock ? [['stock', opts.stock]] : []),
+			...(opts.shippingOptions ? opts.shippingOptions.map((ref) => ['shipping_option', ref]) : []),
+		],
+	})
+
+	console.log(`    Published product: ${opts.title}`)
+	return event
+}
+
 export async function seedComment(
 	relay: Relay,
 	skHex: string,
@@ -369,10 +372,12 @@ export async function seedComment(
 		// Root scope (what we're commenting on)
 		rootEventId: string
 		rootEventPubkey: string
+		rootEventDTag?: string
 		rootKind: number // e.g., 30402 for products
 		// Parent scope (for replies - optional for top-level comments)
 		parentEventId?: string
 		parentEventPubkey?: string
+		parentEventDTag?: string
 		parentKind?: number
 		// Relay hints
 		relayUrl?: string
@@ -382,16 +387,16 @@ export async function seedComment(
 
 	// === ROOT SCOPE TAGS (uppercase) ===
 
-	// Root event reference (E tag for event IDs)
-	// For replaceable/addressable events like products (kind 30023/30402), use A tag
-	if (opts.rootKind === 30402) {
-		// Products are addressable events - use A tag
-		const dTag = opts.rootEventId.split(':')[2] || opts.rootEventId
+	// Root event reference
+
+	// Addressable events - use A tag
+	if (opts.rootKind === 30402 || opts.rootKind === 1111) {
+		const dTag = opts.rootEventDTag ?? opts.rootEventId
 		tags.push(['A', `$${opts.rootKind}:$${opts.rootEventPubkey}:${dTag}`, opts.relayUrl || '', opts.rootEventPubkey])
-	} else {
-		// Regular events - use E tag
-		tags.push(['E', opts.rootEventId, opts.relayUrl || '', opts.rootEventPubkey])
 	}
+
+	// Root ID
+	tags.push(['E', opts.rootEventId, opts.relayUrl || '', opts.rootEventPubkey])
 
 	// Root kind
 	tags.push(['K', opts.rootKind.toString()])
@@ -405,20 +410,16 @@ export async function seedComment(
 	// For replies, parent = the comment we're replying to
 
 	if (opts.parentEventId && opts.parentEventPubkey && opts.parentKind) {
-		// Reply to another comment
-		if (opts.parentKind === 1111) {
+		// Parent A tag (For addressable events)
+		if (opts.parentKind === 1111 || opts.parentKind == 30402) {
+			const dTag = opts.parentEventDTag ?? opts.parentEventId
+			tags.push(['a', `$${opts.parentKind}:$${opts.parentEventPubkey}:${dTag}`, opts.relayUrl || '', opts.parentEventPubkey])
 			// Replying to a comment - use E tag for the comment event
 			tags.push(['e', opts.parentEventId, opts.relayUrl || '', opts.parentEventPubkey])
-		} else {
-			// Replying to the root event directly
-			if (opts.parentKind === 30402) {
-				// Addressable event
-				const dTag = opts.parentEventId.split(':')[2] || opts.parentEventId
-				tags.push(['a', `$${opts.parentKind}:$${opts.parentEventPubkey}:${dTag}`, opts.relayUrl || '', opts.parentEventPubkey])
-			} else {
-				tags.push(['e', opts.parentEventId, opts.relayUrl || '', opts.parentEventPubkey])
-			}
 		}
+
+		// Parent ID
+		tags.push(['e', opts.parentEventId, opts.relayUrl || '', opts.parentEventPubkey])
 
 		// Parent kind
 		tags.push(['k', opts.parentKind.toString()])
@@ -449,6 +450,54 @@ export async function seedComment(
 	})
 
 	console.log(`    Published comment: "$${opts.content.substring(0, 30)}$${opts.content.length > 30 ? '...' : ''}"`)
+	return event
+}
+
+export async function seedReaction(
+	relay: Relay,
+	skHex: string,
+	opts: {
+		emoji: string
+		targetEventId: string
+		targetEventPubkey: string
+		targetKind: number
+		targetDTag?: string // Optional: Provide if known (critical for addressable events like products)
+		relayUrl?: string
+	},
+): Promise<VerifiedEvent> {
+	const tags: string[][] = []
+
+	// 1. 'e' tag
+	tags.push(['e', opts.targetEventId, opts.relayUrl || '', opts.targetEventPubkey])
+
+	// 2. 'a' tag (for addressable events: 30402, 1111, etc.)
+	if (opts.targetKind === 30402 || opts.targetKind === 1111) {
+		if (!opts.targetDTag) {
+			// We will throw an error if 'd' tag is missing for addressable events.
+			throw new Error(`targetDTag is required for addressable event kind ${opts.targetKind}. Please provide it or fetch the event first.`)
+		}
+		const aTagValue = `$${opts.targetKind}:$${opts.targetEventPubkey}:${opts.targetDTag}`
+		tags.push(['a', aTagValue, opts.relayUrl || '', opts.targetEventPubkey])
+	}
+
+	// 3. 'p' tag
+	tags.push(['p', opts.targetEventPubkey, opts.relayUrl || ''])
+
+	// 4. 'k' tag
+	tags.push(['k', opts.targetKind.toString()])
+
+	const unsignedEvent = {
+		kind: 7, // NIP-25 Reaction
+		content: opts.emoji,
+		created_at: Math.floor(Date.now() / 1000),
+		pubkey: skHex, // Note: In seed functions, we usually sign with the secret key directly
+		tags,
+	}
+
+	// Sign and publish
+	const event = await publish(relay, skHex, unsignedEvent)
+
+	console.log(`    Published reaction: "${opts.emoji}" on event ${opts.targetEventId}`)
 	return event
 }
 
