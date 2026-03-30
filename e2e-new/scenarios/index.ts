@@ -391,7 +391,7 @@ export async function seedComment(
 	// Addressable events - use A tag
 	if (opts.rootKind === 30402 || opts.rootKind === 1111) {
 		const dTag = opts.rootEventDTag ?? opts.rootEventId
-		tags.push(['A', `$${opts.rootKind}:$${opts.rootEventPubkey}:${dTag}`, opts.relayUrl || '', opts.rootEventPubkey])
+		tags.push(['A', `${opts.rootKind}:${opts.rootEventPubkey}:${dTag}`, opts.relayUrl || '', opts.rootEventPubkey])
 	}
 
 	// Root ID
@@ -412,7 +412,7 @@ export async function seedComment(
 		// Parent A tag (For addressable events)
 		if (opts.parentKind === 1111 || opts.parentKind == 30402) {
 			const dTag = opts.parentEventDTag ?? opts.parentEventId
-			tags.push(['a', `$${opts.parentKind}:$${opts.parentEventPubkey}:${dTag}`, opts.relayUrl || '', opts.parentEventPubkey])
+			tags.push(['a', `${opts.parentKind}:${opts.parentEventPubkey}:${dTag}`, opts.relayUrl || '', opts.parentEventPubkey])
 			// Replying to a comment - use E tag for the comment event
 			tags.push(['e', opts.parentEventId, opts.relayUrl || '', opts.parentEventPubkey])
 		}
@@ -429,7 +429,7 @@ export async function seedComment(
 		// Top-level comment - parent = root
 		if (opts.rootKind === 30402) {
 			const dTag = opts.rootEventId.split(':')[2] || opts.rootEventId
-			tags.push(['a', `$${opts.rootKind}:$${opts.rootEventPubkey}:${dTag}`, opts.relayUrl || '', opts.rootEventPubkey])
+			tags.push(['a', `${opts.rootKind}:${opts.rootEventPubkey}:${dTag}`, opts.relayUrl || '', opts.rootEventPubkey])
 		} else {
 			tags.push(['e', opts.rootEventId, opts.relayUrl || '', opts.rootEventPubkey])
 		}
