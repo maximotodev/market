@@ -1,6 +1,8 @@
 import { test, expect, type Page } from '../fixtures'
-import { devUser1, devUser2 } from '../../src/lib/fixtures'
+import { devUser1, devUser2, devUser3 } from '../../src/lib/fixtures'
 import { nip19 } from 'nostr-tools'
+import { resetAppBlacklist, resetAppFeaturedList } from 'e2e-new/scenarios'
+import { npubEncode } from 'nostr-tools/nip19'
 
 test.use({ scenario: 'merchant' })
 
@@ -60,8 +62,11 @@ async function clickDestructiveButtonForText(page: Page, text: string) {
 	await expect(rowText).toBeVisible({ timeout: 15_000 })
 
 	const row = rowText.locator('xpath=ancestor::div[contains(@class,"flex") and contains(@class,"items-center")]')
-	await row.locator('button[class*="destructive"]').click()
-	await expect(rowText).not.toBeVisible({ timeout: 15_000 })
+	const destructiveButton = row.locator('button[class*="destructive"]')
+
+	await expect(destructiveButton).toBeVisible()
+	await destructiveButton.click({ timeout: 15_000 })
+	await expect(rowText).toBeHidden({ timeout: 15_000 })
 }
 
 const compactNpub = (pubkey: string) => {
@@ -91,6 +96,11 @@ test.describe('App Settings', () => {
 })
 
 // --- Featured Items ---
+
+test.beforeEach(async () => {
+	console.log('TEST === RUNNING BEFORE EACH')
+	await resetAppFeaturedList()
+})
 
 test.describe('Featured Items', () => {
 	test('admin can view featured items page with tabs', async ({ merchantPage }) => {
@@ -163,10 +173,12 @@ test.describe('Featured Items', () => {
 		const usersPanel = merchantPage.getByRole('tabpanel', { name: /Users/ })
 		await expect(usersPanel).toBeVisible()
 
-		await fillAndAdd(merchantPage, 'newUser', devUser2.pk)
+		await fillAndAdd(merchantPage, 'newUser', devUser3.pk)
 
-		// User should appear — at least one remove button should exist in the Users tab
-		await expect(usersPanel.locator('button[class*="destructive"]').first()).toBeVisible({ timeout: 15_000 })
+		// User should appear - Verify for first & last 6 digits of npub are displayed
+		const userNpub = npubEncode(devUser3.pk)
+		await expect(usersPanel.getByText(userNpub.slice(0, 6))).toBeVisible({ timeout: 15_000 })
+		await expect(usersPanel.getByText(userNpub.slice(-6))).toBeVisible({ timeout: 15_000 })
 	})
 
 	test('permissions section shows admin role', async ({ merchantPage }) => {
@@ -188,6 +200,10 @@ test.describe('Featured Items', () => {
 })
 
 // --- Blacklists ---
+
+test.beforeEach(async () => {
+	await resetAppBlacklist()
+})
 
 test.describe('Blacklists', () => {
 	test('admin can view blacklists page with tabs', async ({ merchantPage }) => {
@@ -213,18 +229,9 @@ test.describe('Blacklists', () => {
 	test('can remove a user from blacklist', async ({ merchantPage }) => {
 		await gotoAdminRoute(merchantPage, '/dashboard/app-settings/blacklists')
 		await expectPageHeading(merchantPage, 'Blacklists')
+		await fillAndAdd(merchantPage, 'newUser', devUser3.pk)
 
-		const userLabel = compactNpub(devUser2.pk)
-
-		if (
-			!(await merchantPage
-				.getByText(userLabel)
-				.isVisible()
-				.catch(() => false))
-		) {
-			await fillAndAdd(merchantPage, 'newUser', devUser2.pk)
-			await expectInputCleared(merchantPage, 'newUser')
-		}
+		const userLabel = compactNpub(devUser3.pk)
 
 		await clickDestructiveButtonForText(merchantPage, userLabel)
 	})
