@@ -4,7 +4,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import type { ProductWorkflowResolution } from '@/lib/workflow/productWorkflowResolver'
 import { authStore } from '@/lib/stores/auth'
 import { ndkActions } from '@/lib/stores/ndk'
-import { productFormActions, productFormStore, type ProductFormTab } from '@/lib/stores/product'
+import { productFormActions, productFormStore, type ProductFormState, type ProductFormTab } from '@/lib/stores/product'
 import { uiActions } from '@/lib/stores/ui'
 import { hasProductFormDraft } from '@/lib/utils/productFormStorage'
 import { createShippingReference, getShippingInfo, useShippingOptionsByPubkey, isShippingDeleted } from '@/queries/shipping'
@@ -16,6 +16,75 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { NameTab } from './NameTab'
 import { CategoryTab, DetailTab, ImagesTab, ShippingTab, SpecTab } from './tabs'
+
+const PRODUCT_FORM_TAB_ORDER: ProductFormTab[] = ['name', 'detail', 'spec', 'category', 'images', 'shipping']
+
+const PRODUCT_FORM_TAB_LABELS: Record<ProductFormTab, string> = {
+	name: 'Name',
+	detail: 'Detail',
+	spec: 'Spec',
+	category: 'Category',
+	images: 'Images',
+	shipping: 'Shipping',
+}
+
+type ProductFormWorkflowState = Pick<
+	ProductFormState,
+	'name' | 'description' | 'price' | 'quantity' | 'mainCategory' | 'images' | 'shippings'
+>
+
+function isValidNumberString(value: string): boolean {
+	return value.trim().length > 0 && !isNaN(Number(value))
+}
+
+function getTabValidationIssues(state: ProductFormWorkflowState, tab: ProductFormTab): string[] {
+	switch (tab) {
+		case 'name': {
+			const issues: string[] = []
+			if (state.name.trim().length === 0) issues.push('Product name is required')
+			if (state.description.trim().length === 0) issues.push('Description is required')
+			return issues
+		}
+		case 'detail': {
+			const issues: string[] = []
+			if (!isValidNumberString(state.price)) issues.push('Valid product price is required')
+			if (!isValidNumberString(state.quantity)) issues.push('Valid product quantity is required')
+			return issues
+		}
+		case 'category':
+			return state.mainCategory ? [] : ['Main category is required']
+		case 'images':
+			return state.images.length > 0 ? [] : ['At least one image is required']
+		case 'shipping':
+			return state.shippings.some((shipping) => !!shipping.shippingRef) ? [] : ['At least one shipping option is required']
+		case 'spec':
+			return []
+	}
+}
+
+function getFormValidationIssues(state: ProductFormWorkflowState): string[] {
+	return PRODUCT_FORM_TAB_ORDER.flatMap((tab) => getTabValidationIssues(state, tab))
+}
+
+function getFirstBlockingTab(state: ProductFormWorkflowState, targetTab: ProductFormTab): ProductFormTab | null {
+	const targetIndex = PRODUCT_FORM_TAB_ORDER.indexOf(targetTab)
+
+	if (targetIndex <= 0) return null
+
+	for (const tab of PRODUCT_FORM_TAB_ORDER.slice(0, targetIndex)) {
+		if (getTabValidationIssues(state, tab).length > 0) {
+			return tab
+		}
+	}
+
+	return null
+}
+
+function getAdjacentTab(currentTab: ProductFormTab, direction: 'next' | 'previous'): ProductFormTab | null {
+	const currentIndex = PRODUCT_FORM_TAB_ORDER.indexOf(currentTab)
+	const offset = direction === 'next' ? 1 : -1
+	return PRODUCT_FORM_TAB_ORDER[currentIndex + offset] ?? null
+}
 
 export function ProductFormContent({
 	className = '',
@@ -37,7 +106,7 @@ export function ProductFormContent({
 
 	// Get form state from store, including editingProductId
 	const formState = useStore(productFormStore)
-	const { activeTab, editingProductId, isDirty, shippings, name, description, images } = formState
+	const { activeTab, editingProductId, isDirty, shippings } = formState
 	const resolvedWorkflow: ProductWorkflowResolution = workflow ?? {
 		mode: editingProductId ? 'edit' : 'create',
 		isBootstrapReady: true,
@@ -46,20 +115,16 @@ export function ProductFormContent({
 		requiresV4VSetup: false,
 	}
 
-	// Compute validation states
-	const hasValidName = name.trim().length > 0
-	const hasValidDescription = description.trim().length > 0
-	const hasValidImages = images.length > 0
-
-	// Compute validation message for tooltip
-	const getValidationMessage = () => {
-		const issues: string[] = []
-		if (!hasValidName) issues.push('Product name is required')
-		if (!hasValidDescription) issues.push('Description is required')
-		if (!hasValidImages) issues.push('At least one image is required')
-		if (!hasValidShipping) issues.push('At least one shipping option is required')
-		return issues
-	}
+	const validationIssuesByTab = useMemo(
+		() =>
+			Object.fromEntries(PRODUCT_FORM_TAB_ORDER.map((tab) => [tab, getTabValidationIssues(formState, tab)])) as Record<
+				ProductFormTab,
+				string[]
+			>,
+		[formState],
+	)
+	const currentTabValidationIssues = validationIssuesByTab[activeTab]
+	const formValidationIssues = useMemo(() => getFormValidationIssues(formState), [formState])
 
 	// Get user pubkey from auth store directly to avoid timing issues
 	const authState = useStore(authStore)
@@ -226,6 +291,54 @@ export function ProductFormContent({
 		},
 	})
 
+	const handleTabChange = useCallback(
+		(value: string) => {
+			const targetTab = value as ProductFormTab
+			if (targetTab === activeTab) return
+
+			if (editingProductId) {
+				productFormActions.setActiveTab(targetTab)
+				return
+			}
+
+			const currentIndex = PRODUCT_FORM_TAB_ORDER.indexOf(activeTab)
+			const targetIndex = PRODUCT_FORM_TAB_ORDER.indexOf(targetTab)
+
+			if (targetIndex < currentIndex) {
+				productFormActions.setActiveTab(targetTab)
+				return
+			}
+
+			const blockingTab = getFirstBlockingTab(formState, targetTab)
+			if (blockingTab) {
+				toast.error(`Complete ${PRODUCT_FORM_TAB_LABELS[blockingTab]} before moving to ${PRODUCT_FORM_TAB_LABELS[targetTab]}`)
+				return
+			}
+
+			productFormActions.setActiveTab(targetTab)
+		},
+		[activeTab, editingProductId, formState],
+	)
+
+	const handleNext = useCallback(() => {
+		if (currentTabValidationIssues.length > 0) return
+
+		const nextTab = getAdjacentTab(activeTab, 'next')
+		if (nextTab) {
+			productFormActions.setActiveTab(nextTab)
+		}
+	}, [activeTab, currentTabValidationIssues])
+
+	const handleBack = useCallback(() => {
+		const previousTab = getAdjacentTab(activeTab, 'previous')
+		if (previousTab) {
+			productFormActions.setActiveTab(previousTab)
+		}
+	}, [activeTab])
+
+	const previousTab = getAdjacentTab(activeTab, 'previous')
+	const isCurrentTabBlocked = currentTabValidationIssues.length > 0
+
 	return (
 		<form
 			onSubmit={(e) => {
@@ -233,17 +346,13 @@ export function ProductFormContent({
 				e.stopPropagation()
 				form.handleSubmit()
 			}}
-			className={`flex flex-col h-full ${className}`}
+			className={`flex h-full min-h-0 flex-col overflow-hidden ${className}`}
 			data-testid="product-form"
-			data-shipping-loaded={isShippingFetched || !!editingProductId}
+			data-shipping-loaded={isShippingFetched || !userPubkey || !!editingProductId}
 		>
 			<div className="flex-1 flex flex-col min-h-0 overflow-hidden max-h-[calc(100vh-200px)]">
 				{/* Single level tabs: Name, Detail, Spec, Category, Images, Shipping */}
-				<Tabs
-					value={activeTab}
-					onValueChange={(value) => productFormActions.setActiveTab(value as ProductFormTab)}
-					className="w-full flex flex-col flex-1 min-h-0 overflow-hidden"
-				>
+				<Tabs value={activeTab} onValueChange={handleTabChange} className="w-full flex flex-col flex-1 min-h-0 overflow-hidden">
 					<TabsList className="w-full bg-transparent h-auto p-0 flex flex-wrap gap-[1px]">
 						<TabsTrigger
 							value="name"
@@ -251,7 +360,7 @@ export function ProductFormContent({
 							data-testid="product-tab-name"
 						>
 							Name
-							{(!hasValidName || !hasValidDescription) && <span className="ml-1 text-red-500">*</span>}
+							{validationIssuesByTab.name.length > 0 && <span className="ml-1 text-red-500">*</span>}
 						</TabsTrigger>
 						<TabsTrigger
 							value="detail"
@@ -259,6 +368,7 @@ export function ProductFormContent({
 							data-testid="product-tab-detail"
 						>
 							Detail
+							{validationIssuesByTab.detail.length > 0 && <span className="ml-1 text-red-500">*</span>}
 						</TabsTrigger>
 						<TabsTrigger
 							value="spec"
@@ -273,6 +383,7 @@ export function ProductFormContent({
 							data-testid="product-tab-category"
 						>
 							Category
+							{validationIssuesByTab.category.length > 0 && <span className="ml-1 text-red-500">*</span>}
 						</TabsTrigger>
 						<TabsTrigger
 							value="images"
@@ -280,7 +391,7 @@ export function ProductFormContent({
 							data-testid="product-tab-images"
 						>
 							Images
-							{!hasValidImages && <span className="ml-1 text-red-500">*</span>}
+							{validationIssuesByTab.images.length > 0 && <span className="ml-1 text-red-500">*</span>}
 						</TabsTrigger>
 						<TabsTrigger
 							value="shipping"
@@ -288,11 +399,11 @@ export function ProductFormContent({
 							data-testid="product-tab-shipping"
 						>
 							Shipping
-							{!hasValidShipping && <span className="ml-1 text-red-500">*</span>}
+							{validationIssuesByTab.shipping.length > 0 && <span className="ml-1 text-red-500">*</span>}
 						</TabsTrigger>
 					</TabsList>
 
-					<div className="flex-1 overflow-y-auto min-h-0">
+					<div className="flex-1 overflow-y-auto min-h-0" data-testid="product-form-scroll-container">
 						<TabsContent value="name" className="mt-4">
 							<NameTab />
 						</TabsContent>
@@ -323,12 +434,12 @@ export function ProductFormContent({
 			{showFooter && (
 				<div className="bg-white border-t pt-4 pb-4 mt-4">
 					<div className="flex gap-2 w-full">
-						{activeTab !== 'name' && (
+						{previousTab && (
 							<Button
 								type="button"
 								variant="outline"
 								className="flex-1 gap-2 uppercase"
-								onClick={productFormActions.previousTab}
+								onClick={handleBack}
 								data-testid="product-back-button"
 							>
 								<span className="i-back w-6 h-6"></span>
@@ -350,9 +461,12 @@ export function ProductFormContent({
 						) : activeTab === 'shipping' || editingProductId ? (
 							<form.Subscribe
 								selector={(state) => [state.canSubmit, state.isSubmitting]}
-								children={([canSubmit, isSubmitting]) => {
+								children={([, isSubmitting]) => {
+									const hasValidationErrors = formValidationIssues.length > 0
+									const isDisabled = isSubmitting || isPublishing || hasValidationErrors
+
 									// Check if we need V4V setup for new products
-									if (resolvedWorkflow.requiresV4VSetup && !editingProductId) {
+									if (resolvedWorkflow.requiresV4VSetup && !editingProductId && !hasValidationErrors) {
 										return (
 											<TooltipProvider>
 												<Tooltip>
@@ -381,10 +495,6 @@ export function ProductFormContent({
 										)
 									}
 
-									const validationIssues = getValidationMessage()
-									const hasValidationErrors = validationIssues.length > 0
-									const isDisabled = isSubmitting || isPublishing || hasValidationErrors
-
 									return (
 										<TooltipProvider>
 											<Tooltip>
@@ -410,7 +520,7 @@ export function ProductFormContent({
 												{hasValidationErrors && (
 													<TooltipContent>
 														<ul className="list-disc list-inside space-y-1">
-															{validationIssues.map((issue, i) => (
+															{formValidationIssues.map((issue, i) => (
 																<li key={i}>{issue}</li>
 															))}
 														</ul>
@@ -422,15 +532,33 @@ export function ProductFormContent({
 								}}
 							/>
 						) : (
-							<Button
-								type="button"
-								variant="secondary"
-								className="flex-1 uppercase"
-								onClick={productFormActions.nextTab}
-								data-testid="product-next-button"
-							>
-								Next
-							</Button>
+							<TooltipProvider>
+								<Tooltip>
+									<TooltipTrigger asChild>
+										<span className="flex-1">
+											<Button
+												type="button"
+												variant="secondary"
+												className="w-full uppercase"
+												onClick={handleNext}
+												disabled={isCurrentTabBlocked}
+												data-testid="product-next-button"
+											>
+												Next
+											</Button>
+										</span>
+									</TooltipTrigger>
+									{isCurrentTabBlocked && (
+										<TooltipContent>
+											<ul className="list-disc list-inside space-y-1">
+												{currentTabValidationIssues.map((issue, i) => (
+													<li key={i}>{issue}</li>
+												))}
+											</ul>
+										</TooltipContent>
+									)}
+								</Tooltip>
+							</TooltipProvider>
 						)}
 					</div>
 				</div>
