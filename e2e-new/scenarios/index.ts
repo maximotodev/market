@@ -340,6 +340,74 @@ async function seedProduct(
 	console.log(`    Published product: ${opts.title}`)
 }
 
+export async function seedShippingOptionForUser(skUser: string) {
+	const relay = await Relay.connect(RELAY_URL)
+
+	const id = `shipping_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`
+
+	await publish(relay, skUser, {
+		kind: 30402,
+		created_at: Math.floor(Date.now() / 1000),
+		content: '',
+		tags: [
+			['d', id],
+			['title', 'seeded shipping option - digital'],
+			['price', '0', 'USD'],
+			['service', 'digital'],
+		],
+	})
+
+	console.log(`    Published shipping option with ID: ${id}`)
+}
+
+/**
+ * Resets entire blacklist (Users, Products, Collections) using admin secret key
+ */
+export async function resetAppBlacklist() {
+	const relay = await Relay.connect(RELAY_URL)
+	const skAdmin = devUser1.sk
+
+	await publish(relay, skAdmin, {
+		kind: 10000, // NIP-51 mute list
+		created_at: Math.floor(Date.now() / 1000),
+		content: '',
+		tags: [],
+	})
+
+	console.log(`    Reset app Blacklist.`)
+}
+
+export async function resetAppFeaturedList() {
+	const relay = await Relay.connect(RELAY_URL)
+	const skAdmin = devUser1.sk
+
+	await Promise.all([
+		// Products
+		publish(relay, skAdmin, {
+			kind: 30405,
+			created_at: Math.floor(Date.now() / 1000),
+			content: '',
+			tags: [['d', 'featured_products']],
+		}),
+		// Collections
+		publish(relay, skAdmin, {
+			kind: 30003,
+			created_at: Math.floor(Date.now() / 1000),
+			content: '',
+			tags: [['d', 'featured_collections']],
+		}),
+		// Users
+		publish(relay, skAdmin, {
+			kind: 30000,
+			created_at: Math.floor(Date.now() / 1000),
+			content: '',
+			tags: [['d', 'featured_users']],
+		}),
+	])
+
+	console.log(`    Reset app Featured list.`)
+}
+
 async function seedV4VShares(relay: Relay, skHex: string, shares: string[][] = []) {
 	await publish(relay, skHex, {
 		kind: 30078,

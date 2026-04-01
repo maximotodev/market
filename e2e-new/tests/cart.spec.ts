@@ -1,7 +1,8 @@
 import type { Page } from '@playwright/test'
 import { test, expect } from '../fixtures'
-import { devUser2 } from '../../src/lib/fixtures'
+import { devUser1, devUser2 } from '../../src/lib/fixtures'
 import { waitForLatestCartSnapshotToBeEmpty } from '../utils/relay-query'
+import { resetRemoteCartForUser } from 'e2e-new/scenarios'
 
 test.use({ scenario: 'marketplace' })
 
@@ -89,6 +90,11 @@ async function waitForProducts(page: Page): Promise<void> {
 // A. Remove Items from Cart
 // ---------------------------------------------------------------------------
 
+test.beforeEach(async () => {
+	// Clear cart for active user
+	await resetRemoteCartForUser(devUser1.sk)
+})
+
 test.describe('Cart - Remove Items', () => {
 	test('can remove a single item from cart', async ({ newUserPage }) => {
 		await safeGoto(newUserPage, '/products')
@@ -137,6 +143,11 @@ test.describe('Cart - Remove Items', () => {
 // ---------------------------------------------------------------------------
 // B. Change Quantity
 // ---------------------------------------------------------------------------
+
+test.beforeEach(async () => {
+	// Clear cart for active user
+	await resetRemoteCartForUser(devUser1.sk)
+})
 
 test.describe('Cart - Change Quantity', () => {
 	test('can increment product quantity using the plus button', async ({ newUserPage }) => {
