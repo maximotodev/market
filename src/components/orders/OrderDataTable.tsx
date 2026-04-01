@@ -1,7 +1,10 @@
+import React from 'react'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { useBreakpoint } from '@/hooks/useBreakpoint'
 import { ArrowDownNarrowWide, ArrowUpNarrowWide, CheckCircle, Circle, Clock, Filter, Loader, Loader2, XCircle } from 'lucide-react'
 import type { OrderWithRelatedEvents } from '@/queries/orders'
 import type { ColumnDef, ColumnFiltersState, FilterFn, SortingState } from '@tanstack/react-table'
@@ -64,6 +67,26 @@ export function OrderDataTable<TData>({
 	const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([])
 	const [globalFilter, setGlobalFilter] = useState('')
 	const navigate = useNavigate()
+	const breakpoint = useBreakpoint()
+	const isCompact = breakpoint !== 'xl'
+
+	const orderByMeta: Record<string, { icon: React.ReactNode; label: string }> = {
+		newest: { icon: <ArrowDownNarrowWide className="h-4 w-4" />, label: 'Newest First' },
+		oldest: { icon: <ArrowUpNarrowWide className="h-4 w-4" />, label: 'Oldest First' },
+		'recently-updated': { icon: <ArrowDownNarrowWide className="h-4 w-4" />, label: 'Recently Updated' },
+		'least-updated': { icon: <ArrowUpNarrowWide className="h-4 w-4" />, label: 'Least Recently Updated' },
+	}
+	const currentOrderByMeta = orderByMeta[orderBy] ?? orderByMeta.newest
+
+	const statusMeta: Record<string, { icon: React.ReactNode; label: string }> = {
+		any: { icon: <Filter className="h-4 w-4" />, label: 'Any Status' },
+		pending: { icon: <Clock className="h-4 w-4" />, label: 'Pending' },
+		confirmed: { icon: <CheckCircle className="h-4 w-4" />, label: 'Confirmed' },
+		processing: { icon: <Loader className="h-4 w-4" />, label: 'Processing' },
+		completed: { icon: <Circle className="h-4 w-4 fill-current" />, label: 'Completed' },
+		cancelled: { icon: <XCircle className="h-4 w-4" />, label: 'Cancelled' },
+	}
+	const currentStatusMeta = statusMeta[statusFilter] ?? statusMeta.any
 
 	const table = useReactTable({
 		data,
@@ -100,9 +123,18 @@ export function OrderDataTable<TData>({
 					{showOrderBy && onOrderByChange && (
 						<div className="w-auto">
 							<Select value={orderBy} onValueChange={onOrderByChange}>
-								<SelectTrigger>
-									<SelectValue placeholder="Order By" />
-								</SelectTrigger>
+								{isCompact ? (
+									<Tooltip>
+										<TooltipTrigger asChild>
+											<SelectTrigger className="w-10 px-0 justify-center">{currentOrderByMeta.icon}</SelectTrigger>
+										</TooltipTrigger>
+										<TooltipContent side="bottom">{currentOrderByMeta.label}</TooltipContent>
+									</Tooltip>
+								) : (
+									<SelectTrigger className="w-auto">
+										<SelectValue placeholder="Order By" />
+									</SelectTrigger>
+								)}
 								<SelectContent>
 									<SelectItem value="newest">
 										<ArrowDownNarrowWide className="h-4 w-4" />
@@ -128,9 +160,18 @@ export function OrderDataTable<TData>({
 					{showStatusFilter && onStatusFilterChange && (
 						<div className="w-auto">
 							<Select defaultValue="any" value={statusFilter} onValueChange={onStatusFilterChange}>
-								<SelectTrigger>
-									<SelectValue placeholder="Any Status" />
-								</SelectTrigger>
+								{isCompact ? (
+									<Tooltip>
+										<TooltipTrigger asChild>
+											<SelectTrigger className="w-10 px-0 justify-center">{currentStatusMeta.icon}</SelectTrigger>
+										</TooltipTrigger>
+										<TooltipContent side="bottom">{currentStatusMeta.label}</TooltipContent>
+									</Tooltip>
+								) : (
+									<SelectTrigger className="w-auto">
+										<SelectValue placeholder="Any Status" />
+									</SelectTrigger>
+								)}
 								<SelectContent>
 									<SelectItem value="any">
 										<Filter className="h-4 w-4" />
@@ -220,7 +261,7 @@ export function OrderDataTable<TData>({
 									</div>
 
 									{/* Desktop Grid Layout - only on xl screens and above */}
-									<div className="hidden xl:grid xl:grid-cols-5 gap-4 p-4 items-center">
+									<div className="hidden xl:grid xl:grid-cols-[repeat(4,minmax(0,1fr))_auto] gap-4 p-4 items-center">
 										{row.getVisibleCells().map((cell) => (
 											<div key={cell.id}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</div>
 										))}
