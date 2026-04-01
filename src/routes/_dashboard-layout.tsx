@@ -347,7 +347,7 @@ function DashboardLayout() {
 					{/* Main content - responsive behavior */}
 					{(!showSidebar || !isMobile) && (
 						<div
-							className={`w-full lg:flex-1 lg:max-w-4xl lg:border lg:border-black lg:rounded lg:bg-white flex flex-col lg:max-h-full lg:overflow-hidden ${
+							className={`w-full lg:flex-1 lg:max-w-[67rem] lg:border lg:border-black lg:rounded lg:bg-white flex flex-col lg:max-h-full lg:overflow-hidden ${
 								isMessageDetailView && isMobile ? 'h-[calc(100vh-8.5rem)]' : ''
 							}`}
 						>
