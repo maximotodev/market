@@ -179,11 +179,11 @@ export function OrderActions({ order, userPubkey, variant = 'outline', className
 			{badgeIconOnly ? (
 				<Tooltip>
 					<TooltipTrigger asChild>
-						<div className={cn('flex w-8 items-center justify-center rounded-md p-1', bgColor, textColor)}>
-							{renderStatusIcon()}
-						</div>
+						<div className={cn('flex w-8 items-center justify-center rounded-md p-1', bgColor, textColor)}>{renderStatusIcon()}</div>
 					</TooltipTrigger>
-					<TooltipContent side="bottom" className="capitalize">{label}</TooltipContent>
+					<TooltipContent side="bottom" className="capitalize">
+						{label}
+					</TooltipContent>
 				</Tooltip>
 			) : (
 				<div className={cn('flex w-[7rem] items-center justify-center gap-1.5 rounded-md px-2 py-1', bgColor, textColor)}>
@@ -196,7 +196,14 @@ export function OrderActions({ order, userPubkey, variant = 'outline', className
 			{nextAction ? (
 				<Tooltip>
 					<TooltipTrigger asChild>
-						<Button variant="primary" size="icon" onClick={nextAction.action} disabled={isLoading} className="h-8 w-8 shrink-0" aria-label={nextAction.label}>
+						<Button
+							variant="primary"
+							size="icon"
+							onClick={nextAction.action}
+							disabled={isLoading}
+							className="h-8 w-8 shrink-0"
+							aria-label={nextAction.label}
+						>
 							<nextAction.icon className="h-4 w-4" />
 						</Button>
 					</TooltipTrigger>

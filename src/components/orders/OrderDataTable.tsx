@@ -126,9 +126,7 @@ export function OrderDataTable<TData>({
 								{isCompact ? (
 									<Tooltip>
 										<TooltipTrigger asChild>
-											<SelectTrigger className="w-10 px-0 justify-center">
-												{currentOrderByMeta.icon}
-											</SelectTrigger>
+											<SelectTrigger className="w-10 px-0 justify-center">{currentOrderByMeta.icon}</SelectTrigger>
 										</TooltipTrigger>
 										<TooltipContent side="bottom">{currentOrderByMeta.label}</TooltipContent>
 									</Tooltip>
@@ -165,9 +163,7 @@ export function OrderDataTable<TData>({
 								{isCompact ? (
 									<Tooltip>
 										<TooltipTrigger asChild>
-											<SelectTrigger className="w-10 px-0 justify-center">
-												{currentStatusMeta.icon}
-											</SelectTrigger>
+											<SelectTrigger className="w-10 px-0 justify-center">{currentStatusMeta.icon}</SelectTrigger>
 										</TooltipTrigger>
 										<TooltipContent side="bottom">{currentStatusMeta.label}</TooltipContent>
 									</Tooltip>
