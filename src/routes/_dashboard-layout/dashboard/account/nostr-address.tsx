@@ -391,6 +391,7 @@ function NostrAddressComponent() {
 									onPaymentComplete={() => {
 										console.log('Zap payment confirmed for invoice:', paymentState.invoiceId)
 										setPaymentState((prev) => ({ ...prev, isOpen: false }))
+										setUsername('')
 										toast.success('Zap confirmed! Your Nostr address is being registered.')
 									}}
 									onCancel={() => setPaymentState((prev) => ({ ...prev, isOpen: false }))}
