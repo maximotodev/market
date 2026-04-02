@@ -16,7 +16,7 @@ let currentProductEvent: VerifiedEvent | undefined
 
 // Setup: Seed a product once before each test in the suite
 
-test.beforeAll(async () => {
+test.beforeEach(async () => {
 	const relay = await Relay.connect(RELAY_URL)
 	const event = await seedProduct(relay, devUser1.sk, {
 		title: 'View Test Product ' + Date.now(),
@@ -26,7 +26,7 @@ test.beforeAll(async () => {
 		status: 'active',
 		category: 'electronics',
 		stock: '10',
-		dTag: 'test-product',
+		dTag: 'test-product-' + Date.now(),
 	})
 	currentProductId = event.id
 	currentProductEvent = event
@@ -122,6 +122,7 @@ const seedExistingComment = async () => {
 		content: 'Existing seeded comment for testing.',
 		rootEventId: currentProductEvent.id,
 		rootEventPubkey: currentProductEvent.pubkey,
+		rootEventDTag: currentProductEvent.tags.find((tag) => tag[0] == 'd')?.[1],
 		rootKind: currentProductEvent.kind,
 	})
 }
