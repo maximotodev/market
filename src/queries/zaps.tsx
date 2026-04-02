@@ -1,17 +1,8 @@
-import { ndkActions, ndkStore } from '@/lib/stores/ndk'
+import { ndkStore } from '@/lib/stores/ndk'
 import { zapKeys } from './queryKeyFactory'
-import { queryOptions, useQuery } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import { NDKEvent, type NDKFilter } from '@nostr-dev-kit/ndk'
 import { decode } from 'light-bolt11-decoder'
-import { getCoordinates } from '@/lib/nostr/coordinates'
-import { isAddressableKind } from 'nostr-tools/kinds'
-
-// --- Constants & Kinds ---
-const LIGHTNING_ZAP_RECEIPT_KIND = 9735
-const NUTZAP_KIND = 9321
-const DELETION_KIND = 5
-
-// --- Interfaces ---
 
 export interface LightningZap {
 	id: string
@@ -26,240 +17,6 @@ export interface LightningZap {
 	descriptionHash: string // SHA256 of the zap request
 	createdAt: number
 	rawEvent: NDKEvent
-}
-
-export interface Nutzap {
-	id: string
-	amountSats: number
-	message: string
-	senderPubkey: string
-	recipientPubkey: string
-	targetEventId?: string
-	targetEventKind?: number
-	mintUrl: string
-	unit: string
-	proofRaw: string // The raw JSON string from the 'proof' tag
-	createdAt: number
-	rawEvent: NDKEvent
-}
-
-// --- Helper Functions ---
-
-/**
- * Parses the Cashu proof JSON string to extract amount.
- */
-const parseCashuProofAmount = (proofString: string): number => {
-	try {
-		const proof = JSON.parse(proofString)
-		return proof.amount || 0
-	} catch (e) {
-		console.error('Failed to parse Cashu proof:', e)
-		return 0
-	}
-}
-
-// --- Lightning Zap Logic (NIP-57) ---
-
-const transformLightningZap = (event: NDKEvent): LightningZap | null => {
-	const ndk = ndkStore.state.zapNdk
-	if (!ndk) throw Error('NDK must be initialized.')
-
-	// Extract Tags
-	const bolt11Tag = event.tags.find((t) => t[0] === 'bolt11')?.[1]
-	const descriptionTag = event.tags.find((t) => t[0] === 'description')?.[1]
-	const pTag = event.tags.find((t) => t[0] === 'p')?.[1]
-	const eTag = event.tags.find((t) => t[0] === 'e')?.[1]
-	const kTag = event.tags.find((t) => t[0] === 'k')?.[1]
-
-	if (!bolt11Tag || !descriptionTag || !pTag) {
-		return null // Invalid zap receipt
-	}
-
-	const amountMillisatsRaw = decode(bolt11Tag).sections.find((s) => s.name == 'amount')?.value
-	if (!amountMillisatsRaw) {
-		console.error('No valid payment amount found for lightning zap.')
-		return null
-	}
-
-	const amount = parseInt(amountMillisatsRaw) / 1000
-
-	let zapRequest: any
-	try {
-		zapRequest = JSON.parse(descriptionTag)
-	} catch (e) {
-		console.error('Invalid JSON in zap receipt description', e)
-		return null
-	}
-
-	return {
-		id: event.id,
-		amountMillisats: amount,
-		message: zapRequest.content || '',
-		senderPubkey: zapRequest.pubkey, // Sender is inside the description
-		recipientPubkey: pTag,
-		targetEventId: eTag,
-		targetEventKind: kTag ? parseInt(kTag, 10) : undefined,
-		bolt11: bolt11Tag,
-		descriptionHash: event.tags.find((t) => t[0] === 'bolt11')?.[2] || '', // Often implicit, but sometimes explicit
-		createdAt: event.created_at ?? Math.floor(Date.now() / 1000),
-		rawEvent: event,
-	}
-}
-
-const fetchLightningZaps = async (targetEvent: NDKEvent): Promise<LightningZap[]> => {
-	const ndk = ndkStore.state.zapNdk
-	if (!ndk) throw new Error('NDK not initialized')
-
-	const filter: NDKFilter = {
-		kinds: [LIGHTNING_ZAP_RECEIPT_KIND],
-		limit: 100, // Adjust as needed
-	}
-
-	// Filter by target event (if zapping a specific note)
-	if (targetEvent.kind === 1 || !isAddressableKind(targetEvent.kind)) {
-		filter['#e'] = [targetEvent.id]
-	} else {
-		// For addressable kinds (long form, etc.), use #a
-		filter['#a'] = [getCoordinates(targetEvent)]
-	}
-
-	// Also filter by recipient pubkey to ensure we only get zaps intended for this user/event
-	filter['#p'] = [targetEvent.pubkey]
-
-	console.log(filter)
-
-	const events = await ndk.fetchEvents(filter)
-
-	console.log('Found ' + events.size + ' lightning zaps.')
-
-	const zaps: LightningZap[] = []
-	for (const event of Array.from(events)) {
-		const zap = transformLightningZap(event)
-		if (zap) zaps.push(zap)
-	}
-
-	// Filter out deleted receipts (optional but recommended)
-	// Similar to your reaction code, fetch deletions for these event IDs
-	const idsToDelete = zaps.map((z) => z.id)
-	if (idsToDelete.length > 0) {
-		const delFilter: NDKFilter = {
-			kinds: [DELETION_KIND],
-			'#e': idsToDelete,
-		}
-		const delEvents = await ndk.fetchEvents(delFilter)
-		const deletedIds = new Set<string>()
-		delEvents.forEach((e) => {
-			e.tags.filter((t) => t[0] === 'e').forEach((t) => t[1] && deletedIds.add(t[1]))
-		})
-		return zaps.filter((z) => !deletedIds.has(z.id))
-	}
-
-	return zaps.sort((a, b) => b.createdAt - a.createdAt)
-}
-
-// --- Nutzap Logic (NIP-61) ---
-
-const transformNutzap = (event: NDKEvent): Nutzap | null => {
-	const ndk = ndkStore.state.zapNdk
-	if (!ndk) throw Error('NDK must be initialized.')
-
-	const proofTag = event.tags.find((t) => t[0] === 'proof')?.[1]
-	const pTag = event.tags.find((t) => t[0] === 'p')?.[1]
-	const uTag = event.tags.find((t) => t[0] === 'u')?.[1]
-	const eTag = event.tags.find((t) => t[0] === 'e')?.[1]
-	const kTag = event.tags.find((t) => t[0] === 'k')?.[1]
-	const unitTag = event.tags.find((t) => t[0] === 'unit')?.[1] || 'sat'
-
-	if (!proofTag || !pTag || !uTag) {
-		return null // Invalid nutzap
-	}
-
-	return {
-		id: event.id,
-		amountSats: parseCashuProofAmount(proofTag),
-		message: event.content || '',
-		senderPubkey: event.pubkey, // Sender is the event author
-		recipientPubkey: pTag,
-		targetEventId: eTag,
-		targetEventKind: kTag ? parseInt(kTag, 10) : undefined,
-		mintUrl: uTag,
-		unit: unitTag,
-		proofRaw: proofTag,
-		createdAt: event.created_at ?? Math.floor(Date.now() / 1000),
-		rawEvent: event,
-	}
-}
-
-const fetchNutzaps = async (targetEvent: NDKEvent): Promise<Nutzap[]> => {
-	const ndk = ndkStore.state.zapNdk
-	if (!ndk) throw new Error('NDK not initialized')
-
-	const filter: NDKFilter = {
-		kinds: [NUTZAP_KIND],
-		limit: 100,
-	}
-
-	// Filter by target event
-	if (targetEvent.kind === 1 || !isAddressableKind(targetEvent.kind)) {
-		filter['#e'] = [targetEvent.id]
-	} else {
-		filter['#a'] = [getCoordinates(targetEvent)]
-	}
-
-	filter['#p'] = [targetEvent.pubkey]
-
-	console.log(filter)
-
-	const events = await ndk.fetchEvents(filter)
-
-	console.log('Found ' + events.size + ' nut zaps.')
-
-	const zaps: Nutzap[] = []
-	for (const event of Array.from(events)) {
-		const zap = transformNutzap(event)
-		if (zap) zaps.push(zap)
-	}
-
-	// Filter deletions
-	const idsToDelete = zaps.map((z) => z.id)
-	if (idsToDelete.length > 0) {
-		const delFilter: NDKFilter = {
-			kinds: [DELETION_KIND],
-			'#e': idsToDelete,
-		}
-		const delEvents = await ndk.fetchEvents(delFilter)
-		const deletedIds = new Set<string>()
-		delEvents.forEach((e) => {
-			e.tags.filter((t) => t[0] === 'e').forEach((t) => t[1] && deletedIds.add(t[1]))
-		})
-		return zaps.filter((z) => !deletedIds.has(z.id))
-	}
-
-	return zaps.sort((a, b) => b.createdAt - a.createdAt)
-}
-
-// --- Unified Hook ---
-
-export interface UnifiedZap {
-	type: 'lightning' | 'nutzap'
-	data: LightningZap | Nutzap
-}
-
-export const useEventZaps = (event: NDKEvent) => {
-	return useQuery({
-		queryKey: zapKeys.byEvent(event.id, event.pubkey),
-		queryFn: async () => {
-			const [lightningZaps, nutzaps] = await Promise.all([fetchLightningZaps(event), fetchNutzaps(event)])
-
-			const unified: UnifiedZap[] = [
-				...lightningZaps.map((z) => ({ type: 'lightning' as const, data: z })),
-				...nutzaps.map((z) => ({ type: 'nutzap' as const, data: z })),
-			]
-
-			return unified.sort((a, b) => b.data.createdAt - a.data.createdAt)
-		},
-		enabled: !!event,
-	})
 }
 
 interface LnurlResponse {
@@ -327,18 +84,12 @@ export const fetchZapsForUserViaProvider = async (userPubkey: string, targetEven
 	const ndk = ndkStore.state.zapNdk
 	if (!ndk) throw new Error('NDK not initialized')
 
-	console.log('Fetching zaps via provider...')
-
 	// 1. Get lud16
 	const lud16 = await getUserLud16(userPubkey)
 	if (!lud16) {
 		console.warn(`No lud16 found for user ${userPubkey}`)
 		return []
 	}
-
-	console.log('Found lud16: ' + lud16)
-
-	console.log('Fetching lnurl data...')
 
 	// 2. Resolve LNURL to get Provider's Pubkey
 	let providerPubkey: string
@@ -349,8 +100,6 @@ export const fetchZapsForUserViaProvider = async (userPubkey: string, targetEven
 		console.error('Failed to resolve LNURL', e)
 		return []
 	}
-
-	console.log('Found provider pubkey through lnurl data: ' + providerPubkey)
 
 	// 3. Fetch zaps signed by the Provider
 	const filter: NDKFilter = {
