@@ -509,7 +509,7 @@ function RouteComponent() {
 							<ImageCarousel images={formattedImages} title={title} onImageClick={handleImageClick} />
 						</div>
 
-						<div className="flex flex-col gap-4 text-white w-full max-w-[600px] mx-auto lg:max-w-none">
+						<div className="flex flex-col gap-2 text-white w-full max-w-[600px] mx-auto lg:max-w-none">
 							<div className="flex items-center justify-between">
 								<h1 className="text-3xl font-semibold lg:pl-0">{title}</h1>
 								<div className="flex items-center gap-2">

@@ -9,6 +9,7 @@ import { useEventReactions } from '@/queries/reactions'
 import { ndkActions } from '@/lib/stores/ndk'
 import type { Reaction } from '@/queries/reactions'
 import { ReactionsList } from './ReactionsList'
+import { ZapsList } from './ZapsList'
 
 interface SocialInteractionsProps {
 	event: NDKEvent
@@ -24,6 +25,7 @@ const SocialInteractions = ({ event, onCommentButtonPressed }: SocialInteraction
 				<CommentButton event={event} onClick={onCommentButtonPressed} />
 				<ShareButton event={event} />
 			</div>
+			<ZapsList event={event} />
 			<ReactionsList event={event} />
 		</>
 	)
