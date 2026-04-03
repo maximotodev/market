@@ -307,6 +307,8 @@ export const productFormActions = {
 		})
 	},
 
+	// Legacy compatibility alias.
+	// Prefer startCreateProductSession() for explicit create-mode initialization.
 	reset: () => {
 		productFormActions.startCreateProductSession()
 	},
