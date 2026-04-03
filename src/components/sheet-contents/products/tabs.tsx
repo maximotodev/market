@@ -911,9 +911,7 @@ export function ShippingTab() {
 												• {option.service || 'Unknown service'}
 											</div>
 										) : shippingOptionsQuery.isFetched ? (
-											<div className="text-sm text-amber-600">
-												This shipping reference is no longer available: {shipping.shippingRef}
-											</div>
+											<div className="text-sm text-amber-600">This shipping reference is no longer available: {shipping.shippingRef}</div>
 										) : (
 											<div className="text-sm text-gray-500">Looking up current shipping metadata...</div>
 										)}
