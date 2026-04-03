@@ -4,14 +4,15 @@ import { useZapCapability } from '@/queries/profiles'
 import { NDKEvent, NDKUser } from '@nostr-dev-kit/ndk'
 import * as React from 'react'
 import { useState } from 'react'
-import { Button } from '../ui/button'
+import { Button, type ButtonVariant } from '../ui/button'
 import { Spinner } from '../ui/spinner'
 
 interface ZapButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
 	event: NDKEvent | NDKUser
+	variant?: ButtonVariant
 }
 
-export function ZapButton({ event, className, onClick, onPointerDown, type, ...props }: ZapButtonProps) {
+export function ZapButton({ event, className, onClick, onPointerDown, type, variant, ...props }: ZapButtonProps) {
 	const [isZapping, setIsZapping] = useState(false)
 	const [dialogOpen, setDialogOpen] = useState(false)
 
@@ -53,13 +54,9 @@ export function ZapButton({ event, className, onClick, onPointerDown, type, ...p
 	return (
 		<>
 			<Button
-				variant="focus"
+				variant={variant ?? 'focus'}
 				size="icon"
-				className={cn(
-					'group border-focus border-2 bg-transparent text-focus hover:bg-focus hover:text-black hover:animate-pulse',
-					'gap-2',
-					className,
-				)}
+				className={cn('group border-focus bg-transparent text-focus hover:bg-focus hover:text-black hover:animate-pulse gap-2', className)}
 				{...props}
 				type={type ?? 'button'}
 				tooltip="Zap"

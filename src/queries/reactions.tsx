@@ -3,7 +3,6 @@ import { reactionKeys } from './queryKeyFactory'
 import { queryOptions, useQuery } from '@tanstack/react-query'
 import { NDKEvent, type NDKFilter } from '@nostr-dev-kit/ndk'
 import { isAddressableKind } from 'nostr-tools/kinds'
-import { getCoordinates } from '@/lib/nostr/coordinates'
 
 /**
  * NIP-25 Reaction kind
@@ -169,7 +168,9 @@ export const fetchEventReactions = async (event: NDKEvent): Promise<Reaction[]> 
 	}
 
 	if (isAddressableKind(event.kind)) {
-		filter['#a'] = [getCoordinates(event)]
+		const address = event.tagAddress()
+
+		filter['#a'] = [address]
 	} else {
 		filter['#e'] = [event.id]
 	}

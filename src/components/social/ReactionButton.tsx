@@ -1,4 +1,4 @@
-import { Button } from '@/components/ui/button'
+import { Button, type ButtonVariant } from '@/components/ui/button'
 import { NDKEvent } from '@nostr-dev-kit/ndk'
 import * as React from 'react'
 import { useEffect, useRef, useState } from 'react'
@@ -12,9 +12,10 @@ import { ndkActions } from '@/lib/stores/ndk'
 
 interface ReactionButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
 	event: NDKEvent
+	variant?: ButtonVariant
 }
 
-export function ReactionButton({ event, className, ...props }: ReactionButtonProps) {
+export function ReactionButton({ event, className, variant, ...props }: ReactionButtonProps) {
 	const { user, isAuthenticated } = useAuth()
 	const { data: reactionsAll, error } = useEventReactions(event)
 	const mutationPublish = usePublishReactionMutation()
@@ -100,7 +101,7 @@ export function ReactionButton({ event, className, ...props }: ReactionButtonPro
 			<Popover open={isOpen}>
 				<PopoverTrigger asChild>
 					<Button
-						variant="outline"
+						variant={variant ?? 'outline'}
 						size="icon"
 						className={'border-2 focus:outline-none ' + classNameButton + ' ' + className}
 						{...props}

@@ -1,11 +1,10 @@
-import { getCoordinates, getCoordinatesOrId } from '@/lib/nostr/coordinates'
 import { type Comment } from '@/queries/comments'
 import { ndkActions } from '@/lib/stores/ndk'
 import { commentKeys } from '@/queries/queryKeyFactory'
 import { NDKEvent } from '@nostr-dev-kit/ndk'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { isAddressableKind } from 'nostr-tools/kinds'
 import { toast } from 'sonner'
+import { isAddressableKind } from 'nostr-tools/kinds'
 
 // NIP-22 Comment kind
 const COMMENT_KIND = 1111
@@ -42,14 +41,12 @@ export const publishComment = async ({ content, targetEvent, parentComment }: Pu
 
 	const tags: string[][] = []
 
-	// Determine if the target is addressable
-	const isTargetAddressable = isAddressableKind(targetEvent.kind)
-	const targetCoordinates = isTargetAddressable ? getCoordinates(targetEvent) : null
-
 	// === ROOT SCOPE (Uppercase) ===
-	if (isTargetAddressable && targetCoordinates) {
+	if (isAddressableKind(targetEvent.kind)) {
 		// Addressable Event (e.g., NIP-99 Product 30402)
-		tags.push(['A', targetCoordinates])
+		const targetAddress = targetEvent.tagAddress()
+
+		tags.push(['A', targetAddress])
 	} else {
 		// Regular Event (e.g., Kind 1, 4, etc.)
 		tags.push(['E', targetEvent.id])
@@ -74,9 +71,11 @@ export const publishComment = async ({ content, targetEvent, parentComment }: Pu
 		tags.push(['p', parentComment?.authorPubkey])
 	} else {
 		// Top-level comment on the target
-		if (isTargetAddressable && targetCoordinates) {
+		if (isAddressableKind(targetEvent.kind)) {
 			// Addressable Target
-			tags.push(['a', targetCoordinates])
+			const targetAddress = targetEvent.tagAddress()
+
+			tags.push(['a', targetAddress])
 		} else {
 			// Regular Target
 			tags.push(['e', targetEvent.id])
@@ -111,7 +110,9 @@ export const usePublishCommentMutation = () => {
 	return useMutation({
 		mutationFn: publishComment,
 		onSuccess: async (event, variables) => {
-			const targetCoordinates = getCoordinatesOrId(variables.targetEvent)
+			const targetCoordinates = isAddressableKind(variables.targetEvent.kind)
+				? variables.targetEvent.tagAddress()
+				: variables.targetEvent.id
 
 			await queryClient.invalidateQueries({
 				queryKey: commentKeys.byProduct(targetCoordinates),

@@ -2,7 +2,6 @@ import { ndkActions } from '@/lib/stores/ndk'
 import { NDKEvent, type NDKFilter } from '@nostr-dev-kit/ndk'
 import { queryOptions, useQuery } from '@tanstack/react-query'
 import { commentKeys } from './queryKeyFactory'
-import { getCoordinates, getCoordinatesOrId } from '@/lib/nostr/coordinates'
 import { isAddressableKind } from 'nostr-tools/kinds'
 
 // NIP-22 Comment Kind
@@ -31,6 +30,7 @@ export interface CommentThread extends Comment {
 
 const transformCommentEvent = (event: NDKEvent, eventTarget: NDKEvent): Comment => {
 	const parentId = event.tags.find((t) => t[0] === 'e')?.at(1)
+	const coordinates = isAddressableKind(eventTarget.kind) ? eventTarget.tagAddress() : undefined
 
 	return {
 		id: event.id,
@@ -41,7 +41,7 @@ const transformCommentEvent = (event: NDKEvent, eventTarget: NDKEvent): Comment 
 		targetEventId: eventTarget.id,
 		targetEventPubkey: eventTarget.pubkey,
 		targetEventKind: eventTarget.kind,
-		targetEventCoordinates: getCoordinates(eventTarget),
+		targetEventCoordinates: coordinates,
 		parentId,
 	}
 }
@@ -70,18 +70,18 @@ export const fetchProductComments = async (event: NDKEvent): Promise<Comment[]> 
 	const filtersReplies: NDKFilter[] = []
 
 	// Build the filter based on whether the target is addressable or regular
-	if (isAddressableKind(event.kind) && event.dTag) {
+	if (isAddressableKind(event.kind)) {
 		// Addressable Event
-		const coordinates = getCoordinates(event)
+		const address = event.tagAddress()
 
 		filters.push({
 			kinds: [COMMENT_KIND],
-			'#a': [coordinates],
+			'#a': [address],
 		})
 
 		filtersReplies.push({
 			kinds: [COMMENT_KIND],
-			'#A': [coordinates],
+			'#A': [address],
 		})
 	} else {
 		// Regular Event (e.g., Kind 1, 4, etc.)
@@ -144,7 +144,7 @@ export const transformCommentsMapIntoThreads = (comments: Comment[]): CommentThr
  * Hook to fetch comments for a product
  */
 export const useComments = (event: NDKEvent) => {
-	const targetCoordinates = getCoordinatesOrId(event)
+	const targetCoordinates = isAddressableKind(event.kind) ? event.tagAddress() : event.id
 
 	return useQuery(
 		queryOptions({

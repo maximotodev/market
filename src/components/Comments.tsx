@@ -21,14 +21,20 @@ import { toast } from 'sonner'
 
 interface CommentItemProps {
 	comment: CommentThread
-	onPressReply: (comment: Comment) => void
-	isReply?: boolean
+	onPressReply: (comment?: Comment) => void
+}
+
+interface CommentThreadProps {
+	comments: CommentThread[]
+	eventRoot: NDKEvent
+	replyingTo?: Comment
+	setReplyingTo: (comment?: Comment) => void
 }
 
 interface AddCommentProps {
 	targetEvent: NDKEvent
-	replyingTo?: Comment
-	onRemoveReplyTo?: () => void
+	parentComment?: Comment
+	onCancel?: () => void
 }
 
 interface CommentsProps {
@@ -44,7 +50,7 @@ function formatDate(timestamp: number): string {
 	})
 }
 
-function CommentItem({ comment, onPressReply, isReply = false }: CommentItemProps) {
+function CommentItem({ comment, onPressReply }: CommentItemProps) {
 	// Get is authenticated for showing/hiding "Reply" button
 	const { user: userSelf, isAuthenticated } = useAuth()
 
@@ -58,44 +64,57 @@ function CommentItem({ comment, onPressReply, isReply = false }: CommentItemProp
 		profileUserParent?.displayName ??
 		(npubUserParentAuthor ? npubUserParentAuthor.slice(0, 9) + '..' + npubUserParentAuthor.slice(-6) : '')
 
-	// Only add an indent for threaded replies if the comment is a top-level comment (i.e. `isReply === false`)
-	const classIndentTopLevelComment = isReply === false ? 'ml-8' : ''
+	return (
+		<div className="relative border-b border-gray-200 py-2 my-4 last:border-b-0">
+			<div className="flex items-center justify-between mb-3">
+				<UserCard pubkey={comment.authorPubkey} />
+				<span className="text-sm text-gray-500">{formatDate(comment.createdAt)}</span>
+			</div>
 
+			{comment.parentComment && <p className="text-xs mb-1">Replying to: {textUserParentAuthor}</p>}
+
+			<p className="text-gray-700 whitespace-pre-wrap mb-1">{comment.content}</p>
+
+			<SocialInteractions
+				event={comment.event}
+				onCommentButtonPressed={() => {
+					if (!isAuthenticated) {
+						toast.error('You must be logged in to comment')
+						return
+					}
+					onPressReply(comment)
+				}}
+				showCommentAsReplyIcon
+				hideShareButton
+				buttonVariant="ghost"
+				combineZapsAndReactions
+				className="comment-social-interactions flex-row items-center"
+			/>
+		</div>
+	)
+}
+
+function CommentThread({ comments, replyingTo, eventRoot, setReplyingTo }: CommentThreadProps) {
 	return (
 		<>
-			<div className="border-b border-gray-200 py-4 last:border-b-0">
-				<div className="flex items-center justify-between mb-3">
-					<UserCard pubkey={comment.authorPubkey} />
-					<span className="text-sm text-gray-500">{formatDate(comment.createdAt)}</span>
-				</div>
-
-				{comment.parentComment && <p className="text-xs mb-1">Replying to: {textUserParentAuthor}</p>}
-
-				<p className="text-gray-700 whitespace-pre-wrap mb-1">{comment.content}</p>
-
-				<SocialInteractions
-					event={comment.event}
-					onCommentButtonPressed={() => {
-						if (!isAuthenticated) {
-							toast.error('You must be logged in to comment')
-							return
-						}
-						onPressReply(comment)
-					}}
-					showCommentAsReplyIcon
-					className="comment-social-interactions"
-				/>
-			</div>
-			<div className={'flex-col gap-2 ' + classIndentTopLevelComment}>
-				{comment.children.map((commentChild) => (
-					<CommentItem key={commentChild.id} comment={commentChild} isReply onPressReply={() => onPressReply(commentChild)} />
-				))}
-			</div>
+			{comments.map((commentChild) => (
+				<>
+					<CommentItem key={commentChild.id} comment={commentChild} onPressReply={() => setReplyingTo(commentChild)} />
+					{replyingTo && replyingTo.id === commentChild.id ? (
+						<AddCommentForm targetEvent={eventRoot} parentComment={commentChild} onCancel={() => setReplyingTo()} />
+					) : null}
+					{commentChild.children && commentChild.children.length > 0 ? (
+						<div className="flex-col gap-2 pl-8 border-l border-gray-200">
+							<CommentThread comments={commentChild.children} replyingTo={replyingTo} eventRoot={eventRoot} setReplyingTo={setReplyingTo} />
+						</div>
+					) : null}
+				</>
+			))}
 		</>
 	)
 }
 
-function AddCommentForm({ targetEvent, replyingTo: parentComment, onRemoveReplyTo }: AddCommentProps) {
+function AddCommentForm({ targetEvent, parentComment, onCancel }: AddCommentProps) {
 	const [content, setContent] = useState('')
 	const publishMutation = usePublishCommentMutation()
 
@@ -118,40 +137,47 @@ function AddCommentForm({ targetEvent, replyingTo: parentComment, onRemoveReplyT
 				parentComment: parentComment,
 			})
 			setContent('')
-			onRemoveReplyTo?.()
+			onCancel?.()
 		} catch {
 			// Error handling (toasts) is done in the mutation hook; keep content so user can retry
 		}
 	}
 
+	const handleCancel = async () => {
+		if (parentComment) {
+			// If this is a reply field, then call onCancel to hide this form
+			onCancel?.()
+		} else {
+			// Else, clear content
+			setContent('')
+		}
+	}
+
+	const disableCancel = !onCancel || publishMutation.isPending
+	const disableSubmit = !content.trim() || publishMutation.isPending
+
 	return (
 		<div className="space-y-2">
-			<div className="flex items-center gap-2">
-				<label htmlFor="comment" className="text-sm font-medium text-gray-700">
-					Leave a comment
-				</label>
-				{/** Pill button to display and/or clear "reply to" state */}
-				{parentComment && (
-					<div className="flex items-center rounded-full bg-accent hover:bg-secondary/20 py-0.5 pr-1 pl-2 gap-1 text-xs">
-						Replying to: {textUserReplyingTo}
-						<X strokeWidth={2} className="w-5 h-5" onClick={onRemoveReplyTo} />
-					</div>
-				)}
-			</div>
+			{parentComment && (
+				<div className="flex items-center gap-2 mb-2">
+					<Reply className="w-4 h-4 text-gray-500" />
+					<span className="text-sm text-gray-600">Replying to: {textUserReplyingTo}</span>
+				</div>
+			)}
 			<Textarea
 				id="comment-input"
 				value={content}
 				onChange={(e) => setContent(e.target.value)}
-				placeholder="Share your thoughts about this product..."
+				placeholder={parentComment ? 'Write your reply...' : 'Share your thoughts about this product...'}
 				rows={4}
-				className="resize-none mt-1"
+				className="resize-none"
 			/>
 
 			<div className="flex justify-end gap-2">
-				<Button variant="outline" onClick={() => setContent('')} disabled={!content.trim() || publishMutation.isPending}>
+				<Button variant="outline" onClick={handleCancel} disabled={disableCancel}>
 					Cancel
 				</Button>
-				<Button variant="secondary" onClick={handleSubmit} disabled={!content.trim() || publishMutation.isPending}>
+				<Button variant="secondary" onClick={handleSubmit} disabled={disableSubmit}>
 					{publishMutation.isPending ? 'Posting...' : 'Submit'}
 				</Button>
 			</div>
@@ -163,8 +189,7 @@ export function Comments({ targetEvent }: CommentsProps) {
 	const { isAuthenticated } = useStore(authStore)
 	const { data: comments, isLoading, error } = useComments(targetEvent)
 	const [showAll, setShowAll] = useState(false)
-
-	const [parentComment, setParentComment] = useState<Comment | undefined>()
+	const [replyingTo, setReplyingTo] = useState<Comment | undefined>(undefined)
 
 	const commentThreads = comments && transformCommentsIntoThreads(comments)
 	const displayedComments = showAll ? commentThreads : commentThreads?.slice(0, 5)
@@ -174,7 +199,7 @@ export function Comments({ targetEvent }: CommentsProps) {
 		<div className="space-y-6" id="comments-section">
 			{/* Add Comment Form - only show for authenticated users */}
 			{isAuthenticated ? (
-				<AddCommentForm targetEvent={targetEvent} replyingTo={parentComment} onRemoveReplyTo={() => setParentComment(undefined)} />
+				<AddCommentForm targetEvent={targetEvent} />
 			) : (
 				<div className="bg-gray-50 p-4 rounded-lg text-center">
 					<p className="text-gray-600">Please log in to leave a comment.</p>
@@ -196,11 +221,7 @@ export function Comments({ targetEvent }: CommentsProps) {
 
 				{displayedComments && displayedComments.length > 0 && (
 					<div>
-						{displayedComments.map((comment) => (
-							<div className="flex-col gap-2" key={comment.id}>
-								<CommentItem key={comment.id} comment={comment} onPressReply={setParentComment} />
-							</div>
-						))}
+						<CommentThread comments={displayedComments} eventRoot={targetEvent} setReplyingTo={setReplyingTo} replyingTo={replyingTo} />
 
 						{hasMoreComments && !showAll && (
 							<Button

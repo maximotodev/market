@@ -1,4 +1,4 @@
-import { Button, type ButtonProps } from '@/components/ui/button'
+import { Button, type ButtonProps, type ButtonVariant } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Textarea } from '@/components/ui/textarea'
 import { NDKEvent } from '@nostr-dev-kit/ndk'
@@ -11,9 +11,10 @@ import { ndkActions } from '@/lib/stores/ndk'
 
 interface CommentButtonProps extends ButtonProps {
 	event: NDKEvent
+	variant?: ButtonVariant
 }
 
-export function CommentButton({ event, className, onClick, onPointerDown, ...props }: CommentButtonProps) {
+export function CommentButton({ event, className, onClick, onPointerDown, variant, ...props }: CommentButtonProps) {
 	const [dialogOpen, setDialogOpen] = useState(false)
 	const [isPosting, setIsPosting] = useState(false)
 	const { isAuthenticated } = useStore(authStore)
@@ -54,7 +55,7 @@ export function CommentButton({ event, className, onClick, onPointerDown, ...pro
 	return (
 		<>
 			<Button
-				variant="outline"
+				variant={variant ?? 'outline'}
 				size="icon"
 				className={'border-foreground border-2 bg-transparent hover:bg-foreground hover:text-background ' + className}
 				type="button"

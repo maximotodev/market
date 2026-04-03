@@ -12,6 +12,8 @@ export interface ButtonProps extends React.ComponentProps<'button'> {
 	iconPosition?: IconPosition
 }
 
+export type ButtonVariant = "primary" | "secondary" | "tertiary" | "focus" | "destructive" | "outline" | "ghost" | "link" | "none" | "dark-ghost" | "dark-subtle" | "dark-muted" | "dark-active" | "success" | "warning" | "dark-destructive"
+
 const buttonVariants = cva(
 	'inline-flex items-center justify-center whitespace-nowrap rounded-lg text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 border-2 border-black box hover:translated cursor-pointer',
 	{

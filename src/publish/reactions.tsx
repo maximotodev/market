@@ -1,4 +1,3 @@
-import { getCoordinates, getCoordinatesOrId } from '@/lib/nostr/coordinates'
 import { ndkActions } from '@/lib/stores/ndk'
 import { reactionKeys } from '@/queries/queryKeyFactory'
 import type { Reaction } from '@/queries/reactions'
@@ -50,9 +49,9 @@ export const publishReaction = async ({ emoji, event }: PublishReactionParams): 
 	const tags: string[][] = []
 
 	if (isAddressableKind(event.kind)) {
+		const address = event.tagAddress()
 		// Add 'a' tag with coordinates (kind:pubkey:d-tag)
-		const coordinates = getCoordinates(event)
-		const aTag = ['a', coordinates]
+		const aTag = ['a', address]
 		tags.push(aTag)
 	} else {
 		// Add 'e' tag with target event id
@@ -121,8 +120,9 @@ export const publishDeletionEvent = async ({ reactionEvent }: PublishDeletionPar
 
 	if (isAddressableKind(reactionEvent.targetEvent.kind)) {
 		// Add 'a' tag with coordinates for reaction target (kind:pubkey:d-tag)
-		const coordinates = getCoordinates(reactionEvent.targetEvent)
-		const aTag = ['a', `${reactionEvent.targetEvent.kind}:${reactionEvent.targetEvent.pubkey}:${coordinates}`]
+		const targetAddress = reactionEvent.targetEvent.tagAddress()
+
+		const aTag = ['a', targetAddress]
 		tags.push(aTag)
 	}
 
