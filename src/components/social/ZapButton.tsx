@@ -60,6 +60,7 @@ export function ZapButton({ event, className, onClick, onPointerDown, type, vari
 				{...props}
 				type={type ?? 'button'}
 				tooltip="Zap"
+				disabledTooltip={!canAuthorReceiveZaps ? 'This user has not configured their zap address.' : undefined}
 				data-testid="zap-button"
 				onClick={(e) => {
 					handleButtonInteraction(e)

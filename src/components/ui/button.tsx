@@ -7,6 +7,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from './tooltip'
 
 export interface ButtonProps extends React.ComponentProps<'button'> {
 	tooltip?: string
+	disabledTooltip?: string
 	asChild?: boolean
 	icon?: React.ReactNode
 	iconPosition?: IconPosition
@@ -75,7 +76,6 @@ function Button({
 	const hasIcon = !!icon
 	const buttonClasses = cn(buttonVariants({ variant, size, className }), hasIcon && 'inline-flex items-center gap-2')
 
-	const { tooltip } = props
 	const content = (
 		<Comp data-slot="button" className={buttonClasses} {...props}>
 			{hasIcon && iconPosition === 'right' ? (
@@ -92,6 +92,21 @@ function Button({
 		</Comp>
 	)
 
+	const { tooltip, disabledTooltip } = props
+
+	if (props.disabled && disabledTooltip) {
+		return (
+			<Tooltip>
+				<TooltipTrigger asChild>
+					<span>
+						{content}
+					</span>
+				</TooltipTrigger>
+				<TooltipContent side="bottom">{disabledTooltip}</TooltipContent>
+			</Tooltip>
+		)
+	}
+	
 	if (tooltip) {
 		return (
 			<Tooltip>

@@ -93,8 +93,12 @@ export function ReactionButton({ event, className, variant, ...props }: Reaction
 	const commonEmojis = ['❤️', '😂', '🔥', '💰', '👀']
 
 	const classNameButton = latestReaction
-		? 'bg-neo-purple hover:bg-neo-purple/80 active:bg-neo-purple/70 text-white hover:text-light-gray'
+		? 'border-neo-purple bg-neo-purple hover:bg-neo-purple/80 active:bg-neo-purple/70 text-white hover:text-light-gray'
 		: 'border-neo-purple bg-transparent hover:bg-neo-purple active:bg-neo-purple/80 text-neo-purple hover:text-white'
+
+	// Override appearance for "ghost" variant for existing reaction. Ideally this should be done with better theme variables & variants
+	const classNameButtonGhost =
+		variant === 'ghost' ? 'bg-transparent text-neo-purple hover:bg-neo-purple/20 active:bg-neo-purple/30' : classNameButton
 
 	return (
 		<>
@@ -103,7 +107,7 @@ export function ReactionButton({ event, className, variant, ...props }: Reaction
 					<Button
 						variant={variant ?? 'outline'}
 						size="icon"
-						className={'border-2 focus:outline-none ' + classNameButton + ' ' + className}
+						className={'border-2 focus:outline-none ' + classNameButtonGhost + ' ' + className}
 						{...props}
 						type="button"
 						data-testid="reaction-button"

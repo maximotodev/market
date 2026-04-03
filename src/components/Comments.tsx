@@ -99,12 +99,17 @@ function CommentThread({ comments, replyingTo, eventRoot, setReplyingTo }: Comme
 		<>
 			{comments.map((commentChild) => (
 				<>
-					<CommentItem key={commentChild.id} comment={commentChild} onPressReply={() => setReplyingTo(commentChild)} />
+					<CommentItem key={'comment-' + commentChild.id} comment={commentChild} onPressReply={() => setReplyingTo(commentChild)} />
 					{replyingTo && replyingTo.id === commentChild.id ? (
-						<AddCommentForm targetEvent={eventRoot} parentComment={commentChild} onCancel={() => setReplyingTo()} />
+						<AddCommentForm
+							key={'add-comment-' + commentChild.id}
+							targetEvent={eventRoot}
+							parentComment={commentChild}
+							onCancel={() => setReplyingTo()}
+						/>
 					) : null}
 					{commentChild.children && commentChild.children.length > 0 ? (
-						<div className="flex-col gap-2 pl-8 border-l border-gray-200">
+						<div key={'comment-thread-' + commentChild.id} className="flex-col gap-2 pl-8 border-l border-gray-200">
 							<CommentThread comments={commentChild.children} replyingTo={replyingTo} eventRoot={eventRoot} setReplyingTo={setReplyingTo} />
 						</div>
 					) : null}
