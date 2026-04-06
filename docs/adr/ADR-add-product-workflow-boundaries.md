@@ -31,27 +31,33 @@ The work will be delivered as a sequence of small, reviewable PRs rather than a 
 ## Architecture boundaries
 
 ### 1. Product draft truth
+
 Product draft state is the source of truth for product authoring data only.
 
 It must not be used as the place where:
+
 - merchant prerequisite/setup truth is persisted
 - workflow navigation truth is reconstructed indirectly
 - external/provider display metadata becomes authoritative identity
 
 Key direction:
+
 - navigation state is not draft mutation
 - canonical refs are preferred over denormalized display objects
 - create/edit session state must not leak across boundaries
 
 ### 2. Merchant setup truth
+
 Merchant setup/prerequisite state is query-derived and semantically explicit.
 
 It must not be collapsed into:
+
 - boolean shortcuts like `shares.length > 0`
 - draft-state persistence
 - product-authoring assumptions that blur create vs edit behavior
 
 Key direction:
+
 - preserve distinctions like:
   - never configured
   - configured zero
@@ -59,7 +65,9 @@ Key direction:
 - treat setup state as prerequisite truth, not draft truth
 
 ### 3. Workflow/session truth
+
 Workflow/session truth determines:
+
 - create vs edit flow mode
 - initial/current step determination
 - prerequisite-driven routing
@@ -68,6 +76,7 @@ Workflow/session truth determines:
 It must become explicit and deterministic rather than effect-driven.
 
 Key direction:
+
 - a new create session always starts fresh
 - initial/current step logic should eventually be centralized in an explicit resolver
 - create-only onboarding rules must not accidentally block edit flow
@@ -86,6 +95,7 @@ Key direction:
 ## Consequences
 
 ### Positive
+
 - clearer source-of-truth boundaries
 - fewer hidden couplings
 - more deterministic workflow behavior
@@ -93,6 +103,7 @@ Key direction:
 - better regression testing around each boundary
 
 ### Costs
+
 - short-term increase in architectural surface area while transitional helpers exist
 - some test contracts need to be updated as semantic truth becomes more accurate
 - workflow logic may temporarily be split between legacy behavior and the new resolver until later slices land
@@ -100,24 +111,31 @@ Key direction:
 ## Rollout / PR sequence
 
 ### PR 1 — create/edit session boundary hardening
+
 Introduce a shared session initializer and ensure all create entry surfaces use it.
 
 ### PR 2 — separate navigation from draft mutation
+
 Make tab changes workflow-only and non-dirty.
 
 ### PR 3 — normalize shipping selection model
+
 Store canonical shipping refs in draft state and derive display metadata.
 
 ### PR 4 — quick-create shipping identity flow
+
 Attach newly created shipping by canonical identity rather than name-based rediscovery.
 
 ### PR 5 — V4V semantic split
+
 Introduce explicit V4V semantic state and stop using share-array length as setup truth.
 
 ### PR 6 — explicit workflow resolver / initial step determination
+
 Centralize create/edit step resolution and remove effect-driven prerequisite routing where touched.
 
 ### PR 7 — canonical validation / publish-readiness alignment
+
 Unify workflow readiness and publish gating under one explicit validation model.
 
 ## Notes
