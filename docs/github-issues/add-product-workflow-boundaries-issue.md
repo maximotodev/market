@@ -42,17 +42,20 @@ The workflow needs to be stabilized by separating truth boundaries and refactori
 ## Invariants
 
 ### Product draft truth
+
 - product draft state must not be the place where merchant prerequisite/setup truth is persisted
 - create and edit must not share mutable session state
 - navigation state must not be treated as product-data mutation
 - canonical draft truth should favor stable internal refs over display metadata
 
 ### Merchant setup truth
+
 - merchant setup state is query-derived prerequisite state and must not be persisted inside product draft state
 - semantic distinctions such as “never configured” vs “configured zero” must be preserved explicitly
 - provider/external integration metadata must not become draft truth
 
 ### Workflow/session truth
+
 - a new create session always starts fresh
 - initial/current step determination must come from explicit workflow logic, not scattered effects
 - create-only onboarding rules must not accidentally block edit flow
@@ -94,6 +97,7 @@ The workflow needs to be stabilized by separating truth boundaries and refactori
 ## Acceptance criteria
 
 ### Functional
+
 - starting create after a failed or abandoned create attempt produces a fresh session with no inherited shipping selections, active step, or stale setup state
 - create and edit no longer leak mutable state into each other
 - tab changes do not dirty the form or trigger autosave
@@ -104,12 +108,14 @@ The workflow needs to be stabilized by separating truth boundaries and refactori
 - publish gating eventually aligns with one canonical validation contract
 
 ### Architectural
+
 - product draft truth, merchant setup truth, and workflow truth are clearly separated
 - query-derived prerequisite state is not persisted as draft truth
 - effect-driven onboarding/publish gating is incrementally removed in favor of explicit semantic/workflow logic
 - each PR is reviewable on its own and does not collapse multiple architectural concerns into one diff
 
 ### Testing
+
 - each slice adds focused regression coverage for the exact boundary it changes
 - deterministic tests exist for:
   - create/edit session isolation
