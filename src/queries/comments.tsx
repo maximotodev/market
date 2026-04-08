@@ -6,6 +6,7 @@ import { isAddressableKind } from 'nostr-tools/kinds'
 
 // NIP-22 Comment Kind
 const COMMENT_KIND = 1111
+export const MAX_COMMENT_THREAD_DEPTH = 5
 
 export interface Comment {
 	id: string
@@ -50,12 +51,23 @@ const transformCommentEventAsThread = (event: NDKEvent, eventTarget: NDKEvent, p
 	return { ...transformCommentEvent(event, eventTarget), parent, children: [] }
 }
 
-const sortCommentThreadByDate = (thread: CommentThread) => {
+const sortCommentThreadByDate = (thread: CommentThread, depth = 0, visited = new Set<string>()) => {
+	if (depth >= MAX_COMMENT_THREAD_DEPTH) {
+		thread.children = []
+		return
+	}
+	if (visited.has(thread.id)) {
+		thread.children = []
+		return
+	}
+
+	visited.add(thread.id)
+
 	// Sort thread children
 	thread.children.sort((a, b) => a.createdAt - b.createdAt)
 
 	// Recursive call to each child
-	thread.children.forEach(sortCommentThreadByDate)
+	thread.children.forEach((child) => sortCommentThreadByDate(child, depth + 1, new Set(visited)))
 }
 
 /**
@@ -116,6 +128,7 @@ export const transformCommentsMapIntoThreads = (comments: Comment[]): CommentThr
 	// Sort replies into threads - Add children & parents
 	mapCommentsById.forEach((comment) => {
 		if (!comment.parentId) return
+		if (comment.parentId === comment.id) return
 
 		const parentComment = mapCommentsById.get(comment.parentId)
 
