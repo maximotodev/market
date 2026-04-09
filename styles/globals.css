@@ -467,7 +467,7 @@ button {
 		overflow: hidden; /* Required alongside min-height: 0 for aspect-ratio in grid */
 	}
 
-	/* Components e.g. buttons */
+	/* Components e.g. buttons, input */
 
 	button {
   		cursor: pointer;
@@ -517,6 +517,22 @@ button {
 			background-color: var(--secondary);
 			color: var(--secondary-foreground);
 		}
+	}
+
+	/* Override focus ring for all inputs and form elements */
+	*:focus-visible {
+		outline: none !important;
+		box-shadow: none !important;
+		border: 1px solid var(--ring) !important;
+	}
+
+	/* Specifically for inputs, textareas, selects */
+	input:focus-visible,
+	textarea:focus-visible,
+	select:focus-visible {
+		outline: none !important;
+		box-shadow: none !important;
+		border: 2px solid var(--ring) !important;
 	}
 
 	/* Custom utility classes */
