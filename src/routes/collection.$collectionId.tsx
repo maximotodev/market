@@ -186,6 +186,12 @@ function RouteComponent() {
 			navigate({ to: '/community' })
 		}
 	}
+	// Handle message button
+	const handleMessageClick = () => {
+		if (user?.pubkey) {
+			uiActions.openConversation(user.pubkey)
+		}
+	}
 
 	return (
 		<div className="flex flex-col gap-4">
