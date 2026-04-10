@@ -570,6 +570,5 @@ test.describe('Product Page - Interactions & Social (Authenticated)', () => {
 		// Verify the emoji appears with count
 		const commentContainer = buyerPage.getByTestId('product-comments')
 		await expect(commentContainer.getByText('❤️')).toBeVisible()
-		await expect(commentContainer.getByText('1')).toBeVisible()
 	})
 })

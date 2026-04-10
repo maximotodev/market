@@ -30,7 +30,8 @@ export interface CommentThread extends Comment {
 }
 
 const transformCommentEvent = (event: NDKEvent, eventTarget: NDKEvent): Comment => {
-	const parentId = event.tags.find((t) => t[0] === 'e')?.at(1)
+	const parentKind = event.tags.find((t) => t[0] === 'k')?.at(1)
+	const parentId = parentKind === COMMENT_KIND.toString() ? event.tags.find((t) => t[0] === 'e')?.at(1) : undefined
 	const coordinates = isAddressableKind(eventTarget.kind) ? eventTarget.tagAddress() : undefined
 
 	return {
@@ -45,6 +46,16 @@ const transformCommentEvent = (event: NDKEvent, eventTarget: NDKEvent): Comment 
 		targetEventCoordinates: coordinates,
 		parentId,
 	}
+}
+
+const commentTargetsEvent = (commentEvent: NDKEvent, eventTarget: NDKEvent): boolean => {
+	const targetAddress = isAddressableKind(eventTarget.kind) ? eventTarget.tagAddress() : undefined
+
+	return commentEvent.tags.some((tag) => {
+		if (tag[0] === 'E') return tag[1] === eventTarget.id
+		if (tag[0] === 'A' || tag[0] === 'a') return !!targetAddress && tag[1] === targetAddress
+		return false
+	})
 }
 
 const transformCommentEventAsThread = (event: NDKEvent, eventTarget: NDKEvent, parent?: Comment) => {
@@ -75,9 +86,6 @@ const sortCommentThreadByDate = (thread: CommentThread, depth = 0, visited = new
  * @param productCoordinates - The product coordinates in format "30018:<pubkey>:<d-tag>"
  */
 export const fetchProductComments = async (event: NDKEvent): Promise<Comment[]> => {
-	const ndk = ndkActions.getNDK()
-	if (!ndk) throw new Error('NDK not initialized')
-
 	const filters: NDKFilter[] = []
 	const filtersReplies: NDKFilter[] = []
 
@@ -95,6 +103,11 @@ export const fetchProductComments = async (event: NDKEvent): Promise<Comment[]> 
 			kinds: [COMMENT_KIND],
 			'#A': [address],
 		})
+
+		filtersReplies.push({
+			kinds: [COMMENT_KIND],
+			'#E': [event.id],
+		})
 	} else {
 		// Regular Event (e.g., Kind 1, 4, etc.)
 		filters.push({
@@ -108,14 +121,24 @@ export const fetchProductComments = async (event: NDKEvent): Promise<Comment[]> 
 		})
 	}
 
-	const [events, replies] = await Promise.all([ndk.fetchEvents(filters), ndk.fetchEvents(filtersReplies)])
+	const [events, replies, fallbackEvents] = await Promise.all([
+		ndkActions.fetchEventsWithTimeout(filters, { timeoutMs: 8000 }),
+		ndkActions.fetchEventsWithTimeout(filtersReplies, { timeoutMs: 8000 }),
+		isAddressableKind(event.kind)
+			? ndkActions.fetchEventsWithTimeout([{ kinds: [COMMENT_KIND], limit: 200 }], { timeoutMs: 8000 })
+			: Promise.resolve(new Set<NDKEvent>()),
+	])
 
-	const comments = Array<Comment>()
+	const commentsById = new Map<string, Comment>()
 
-	events.forEach((e) => comments.push(transformCommentEvent(e, event)))
-	replies.forEach((e) => comments.push(transformCommentEvent(e, event)))
+	events.forEach((e) => commentsById.set(e.id, transformCommentEvent(e, event)))
+	replies.forEach((e) => commentsById.set(e.id, transformCommentEvent(e, event)))
+	fallbackEvents.forEach((e) => {
+		if (!commentTargetsEvent(e, event)) return
+		commentsById.set(e.id, transformCommentEvent(e, event))
+	})
 
-	return comments
+	return Array.from(commentsById.values())
 }
 
 export const transformCommentsMapIntoThreads = (comments: Comment[]): CommentThread[] => {
@@ -148,7 +171,7 @@ export const transformCommentsMapIntoThreads = (comments: Comment[]): CommentThr
 	commentThreads.sort((a, b) => a.createdAt - b.createdAt)
 
 	// Sort threads by date recursively
-	commentThreads.forEach(sortCommentThreadByDate)
+	commentThreads.forEach((thread) => sortCommentThreadByDate(thread))
 
 	return commentThreads
 }
