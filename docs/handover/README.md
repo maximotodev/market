@@ -11,16 +11,16 @@ This folder is the active cleanup checklist for the current ContextVM branch. Us
 - [x] Explain that `make browser-contextvm` should stay available until final validation is complete
 - [x] Clarify that archived notes under `docs/handovers/` are still present only for review/validation
 - [x] Clarify that any final removal of `Makefile` or handover docs belongs in the last cleanup step
+- [x] Define the trim boundary for the transplant
 - [x] Draft the inherited-failure issue design doc
 - [x] Draft the inherited-failure GitHub issue body
 - [x] Mark the inherited-failure issue draft as ready to post
+- [x] Draft the temporary skipped Playwright tests issue
 
 ### Still to do
 
-- [ ] Define the trim boundary and decide what can stay for transplant
 - [ ] Move only the relevant fixes onto the follow-up branch
 - [ ] Create the GitHub issue that explains the inherited-from-`master` failures and must be addressed in the transplanted branch
-- [ ] Draft the issue for the temporary skipped Playwright tests
 - [ ] Run `make browser-contextvm` and verify the happy path
 - [ ] Finish the remaining cleanup commit
 - [ ] Remove handover docs and the `Makefile` only if they are no longer needed
