@@ -64,10 +64,6 @@ function NewProductComponent() {
 	)
 
 	useEffect(() => {
-<<<<<<< HEAD
-		productFormActions.startCreateProductSession()
-	}, [])
-=======
 		hasBootstrappedRef.current = false
 		setIsBootstrapped(false)
 	}, [userPubkey])
@@ -97,7 +93,6 @@ function NewProductComponent() {
 			</Card>
 		)
 	}
->>>>>>> 43565027 (Centralize product workflow bootstrap resolution)
 
 	return (
 		<div className="space-y-6">

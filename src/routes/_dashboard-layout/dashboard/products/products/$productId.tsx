@@ -65,13 +65,6 @@ function EditProductComponent() {
 			if (hasDraft) {
 				// Auto-load the draft instead of prompting
 				setInitState('loading-draft')
-<<<<<<< HEAD
-				await productFormActions.loadDraftForProduct(productDTag)
-				setInitState('ready')
-			} else {
-				setInitState('loading-product')
-				await productFormActions.loadProductForEdit(productId)
-=======
 				await productFormActions.loadDraftForProduct(productDTag, {
 					activeTab: workflow.initialTab,
 				})
@@ -81,7 +74,6 @@ function EditProductComponent() {
 				await productFormActions.loadProductForEdit(productId, {
 					preserveTabState: { activeTab: workflow.initialTab },
 				})
->>>>>>> 43565027 (Centralize product workflow bootstrap resolution)
 				setInitState('ready')
 			}
 		} finally {

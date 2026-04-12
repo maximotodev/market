@@ -326,18 +326,11 @@ export const productFormActions = {
 		})
 	},
 
-<<<<<<< HEAD
-	// Legacy compatibility alias.
-	// Prefer startCreateProductSession() for explicit create-mode initialization.
-	reset: () => {
-		productFormActions.startCreateProductSession()
-=======
 	reset: (options?: { activeTab?: ProductFormTab; editingProductId?: string | null }) => {
 		// Cancel any pending auto-save to prevent stale data from being written
 		cancelPendingSave()
 
 		productFormStore.setState((state) => createResetState(state, options))
->>>>>>> 43565027 (Centralize product workflow bootstrap resolution)
 	},
 
 	updateValues: (values: Partial<ProductFormState>) => {
@@ -395,19 +388,8 @@ export const productFormActions = {
 					...draftValues
 				} = draft
 
-<<<<<<< HEAD
 				const normalizedShippings = normalizeProductShippingSelections((draftValues.shippings as ProductShippingForm[] | undefined) ?? [])
 
-				productFormStore.setState((state) =>
-					getFreshSessionState(state, {
-						...draftValues,
-						shippings: normalizedShippings,
-						editingProductId: productId,
-						activeTab: 'name',
-						isDirty: true,
-					}),
-				)
-=======
 				productFormStore.setState((state) => ({
 					...createResetState(state, {
 						activeTab: options?.activeTab ?? 'name',
@@ -419,7 +401,6 @@ export const productFormActions = {
 					// Mark as dirty since we're loading unsaved changes
 					isDirty: true,
 				}))
->>>>>>> 43565027 (Centralize product workflow bootstrap resolution)
 				return true
 			}
 			return false

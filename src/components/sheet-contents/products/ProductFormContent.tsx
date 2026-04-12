@@ -86,16 +86,21 @@ export function ProductFormContent({
 		)
 	}, [userShippingOptions])
 
+	const hasSelectedShipping = useMemo(() => {
+		return shippings.some((ship) => !!ship.shippingRef)
+	}, [shippings])
+
 	const hasValidShipping = useMemo(() => {
 		return shippings.some((ship) => ship.shippingRef && (!isShippingFetched || resolvedShippingRefs.has(ship.shippingRef)))
 	}, [shippings, isShippingFetched, resolvedShippingRefs])
 
-	// Auto-navigate to 'name' tab after first shipping option is added when we started with shipping first
+	// Once the draft has a shipping reference, move out of the shipping-first bootstrap step
+	// without waiting for query cache propagation to catch up.
 	useEffect(() => {
-		if (resolvedWorkflow.shouldStartAtShipping && hasValidShipping && activeTab === 'shipping') {
+		if (resolvedWorkflow.shouldStartAtShipping && hasSelectedShipping && activeTab === 'shipping') {
 			productFormActions.setActiveTab('name')
 		}
-	}, [resolvedWorkflow.shouldStartAtShipping, hasValidShipping, activeTab])
+	}, [resolvedWorkflow.shouldStartAtShipping, hasSelectedShipping, activeTab])
 
 	// Check for persisted draft on mount (for drafts from previous sessions)
 	const checkForPersistedDraft = useCallback(async () => {
