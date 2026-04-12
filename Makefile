@@ -171,10 +171,13 @@ browser-contextvm: install
 		sleep 1; \
 	done; \
 	sleep 2; \
-	test_app_private_key="$$(nak key generate)"; \
+	test_app_private_key="$$("$(BUN)" --print 'process.env.APP_PRIVATE_KEY || ""')"; \
+	if [ -z "$$test_app_private_key" ]; then \
+		test_app_private_key="$$(nak key generate)"; \
+	fi; \
 	relay_bin="$$(command -v nak 2>/dev/null || printf '%s/go/bin/nak' "$$HOME")"; \
 	"$$relay_bin" serve --port 10547 --hostname 0.0.0.0 >/tmp/contextvm-browser-relay.log 2>&1 & relay_pid=$$!; \
-	i=0; until "$(BUN)" -e 'const r = await fetch("http://localhost:10547"); process.exit(r.status < 500 ? 0 : 1)'; do \
+	i=0; until "$(BUN)" -e 'try { const r = await fetch("http://localhost:10547"); process.exit(r.status < 500 ? 0 : 1) } catch { process.exit(1) }'; do \
 		i=$$((i + 1)); \
 		if [ $$i -ge 30 ]; then \
 			echo "error: relay did not become ready"; \
@@ -197,13 +200,15 @@ browser-contextvm: install
 	done; \
 	lsof -ti:3000 2>/dev/null | xargs -r kill -9 2>/dev/null || true; \
 	sleep 1; \
-	browser_port="$$(for p in $$(seq 34567 34667); do if ! lsof -iTCP:$$p -sTCP:LISTEN >/dev/null 2>&1; then echo $$p; break; fi; done)"; \
+	browser_port="$$(for p in 3000 $$(seq 34567 34667); do if ! lsof -iTCP:$$p -sTCP:LISTEN >/dev/null 2>&1; then echo $$p; break; fi; done)"; \
 	if [ -z "$$browser_port" ]; then \
 		echo "error: unable to find a free browser-contextvm port"; \
 		exit 1; \
 	fi; \
-	APP_PRIVATE_KEY="$$test_app_private_key" APP_RELAY_URL="$(RELAY_URL)" LOCAL_RELAY_ONLY=true NIP46_RELAY_URL="$(RELAY_URL)" BROWSER_CONTEXTVM_PORT="$$browser_port" sh -c '"$(BUN)" run startup && "$(BUN)" run seed && PORT="$BROWSER_CONTEXTVM_PORT" "$(BUN)" --hot src/index.tsx --host 0.0.0.0' >/tmp/contextvm-browser-app.log 2>&1 & app_pid=$$!; \
-	i=0; until "$(BUN)" -e 'const port = process.env.BROWSER_CONTEXTVM_PORT; const config = await fetch(`http://localhost:${port}/api/config`).then((r) => r.json()); process.exit(config.needsSetup ? 1 : 0)'; do \
+	echo "browser-contextvm port: $$browser_port"; \
+	export BROWSER_CONTEXTVM_PORT="$$browser_port"; \
+	APP_PRIVATE_KEY="$$test_app_private_key" APP_RELAY_URL="$(RELAY_URL)" LOCAL_RELAY_ONLY=true NIP46_RELAY_URL="$(RELAY_URL)" BROWSER_CONTEXTVM_PORT="$$browser_port" PORT="$$browser_port" sh -c '"$(BUN)" run startup && "$(BUN)" run seed && "$(BUN)" --hot src/index.tsx --host 0.0.0.0' >/tmp/contextvm-browser-app.log 2>&1 & app_pid=$$!; \
+	i=0; until "$(BUN)" -e 'try { const port = process.env.BROWSER_CONTEXTVM_PORT; const config = await fetch("http://localhost:" + port + "/api/config").then((r) => r.json()); process.exit(config.needsSetup ? 1 : 0) } catch { process.exit(1) }'; do \
 		i=$$((i + 1)); \
 		if [ $$i -ge 60 ]; then \
 			echo "error: app config did not become ready"; \
@@ -212,7 +217,7 @@ browser-contextvm: install
 		fi; \
 		sleep 1; \
 	done; \
-	i=0; until "$(BUN)" -e 'const port = process.env.BROWSER_CONTEXTVM_PORT; const res = await fetch(`http://localhost:${port}/products`); const html = await res.text(); process.exit(res.ok && !html.includes("No products found") ? 0 : 1)'; do \
+	i=0; until "$(BUN)" -e 'try { const port = process.env.BROWSER_CONTEXTVM_PORT; const res = await fetch("http://localhost:" + port + "/products"); const html = await res.text(); process.exit(res.ok && !html.includes("No products found") ? 0 : 1) } catch { process.exit(1) }'; do \
 		i=$$((i + 1)); \
 		if [ $$i -ge 60 ]; then \
 			echo "error: products were not seeded or visible"; \

@@ -208,13 +208,13 @@ One paragraph stating whether the failures appear introduced by the ContextVM ch
 
 ### Per-test comparison table
 
-| Test / Job | Base result | Head result | Notes |
-| --- | --- | --- | --- |
-| `e2e-full` |  |  |  |
-| checkout / payments flow |  |  |  |
-| shipping-special flow |  |  |  |
-| order lifecycle flow |  |  |  |
-| unrelated product/collection tests |  |  |  |
+| Test / Job                         | Base result | Head result | Notes |
+| ---------------------------------- | ----------- | ----------- | ----- |
+| `e2e-full`                         |             |             |       |
+| checkout / payments flow           |             |             |       |
+| shipping-special flow              |             |             |       |
+| order lifecycle flow               |             |             |       |
+| unrelated product/collection tests |             |             |       |
 
 ### Evidence
 
