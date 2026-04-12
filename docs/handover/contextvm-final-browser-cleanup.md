@@ -35,7 +35,7 @@ Clean up any temporary files or code paths that were only needed to debug the br
 
 ### 3) Move handover docs out of the feature path
 
-Move the handover docs into `docs/handover/` so they are no longer mixed with the feature implementation path.
+Move any remaining handover docs from `docs/handovers/` into `docs/handover/` so they are no longer mixed with the feature implementation path.
 
 If the browser validation still depends on the docs, keep them until this step and remove them in the final cleanup commit.
 
