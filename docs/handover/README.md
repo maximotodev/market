@@ -13,6 +13,7 @@ This folder is the active cleanup checklist for the current ContextVM branch. Us
 - [x] Clarify that any final removal of `Makefile` or handover docs belongs in the last cleanup step
 - [x] Draft the inherited-failure issue design doc
 - [x] Draft the inherited-failure GitHub issue body
+- [x] Mark the inherited-failure issue draft as ready to post
 
 ### Still to do
 
