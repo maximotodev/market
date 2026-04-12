@@ -96,6 +96,10 @@ const getShareButton = (page: Page): Locator => {
 	return getProductHero(page).getByTestId('share-button')
 }
 
+const getPopoverContent = (page: Page): Locator => {
+	return page.locator('[data-slot="popover-content"]')
+}
+
 /**
  * Verifies the reaction button is in the "filled" (active) state.
  */
@@ -466,12 +470,15 @@ test.describe('Product Page - Interactions & Social (Authenticated)', () => {
 		// Hover to open popover
 		await reactionBtn.hover()
 
+		const popover = getPopoverContent(buyerPage)
+		await expect(popover).toBeVisible({ timeout: 5000 })
+
 		// Verify emojis appear
-		await expect(buyerPage.getByText('❤️')).toBeVisible({ timeout: 5000 })
-		await expect(buyerPage.getByText('😂')).toBeVisible()
-		await expect(buyerPage.getByText('🔥')).toBeVisible()
-		await expect(buyerPage.getByText('💰')).toBeVisible()
-		await expect(buyerPage.getByText('👀')).toBeVisible()
+		await expect(popover.getByRole('button', { name: '❤️' })).toBeVisible()
+		await expect(popover.getByRole('button', { name: '😂' })).toBeVisible()
+		await expect(popover.getByRole('button', { name: '🔥' })).toBeVisible()
+		await expect(popover.getByRole('button', { name: '💰' })).toBeVisible()
+		await expect(popover.getByRole('button', { name: '👀' })).toBeVisible()
 	})
 
 	test('can add a reaction by selecting an emoji', async ({ buyerPage }) => {
@@ -564,13 +571,23 @@ test.describe('Product Page - Interactions & Social (Authenticated)', () => {
 		await commentReactionBtn.hover()
 
 		// Select emoji
-		await buyerPage.getByText('❤️').click()
+		const popover = getPopoverContent(buyerPage)
+		await expect(popover).toBeVisible({ timeout: 5000 })
+		await popover.getByRole('button', { name: '❤️' }).click()
 
 		// Verify reaction was added - check for filled state
 		await expect(commentReactionBtn).toHaveClass(/bg-neo-purple/)
 
+<<<<<<< HEAD
 		// Verify the emoji appears with count
 		const commentContainer = buyerPage.getByTestId('product-comments')
 		await expect(commentContainer.getByText('❤️')).toBeVisible()
+=======
+		// Verify the reaction chip appears on the same comment with count 1
+		const commentReactionsList = commentSocialInteractions.getByTestId('reactions-list').first()
+		const reactionChip = commentReactionsList.getByRole('button', { name: /❤️/ })
+		await expect(reactionChip).toBeVisible()
+		await expect(reactionChip).toContainText('1')
+>>>>>>> 8e20ef62 (test: stabilize product-page social interaction selectors)
 	})
 })
