@@ -2,9 +2,11 @@
 
 ## Purpose
 
-This document defines the cleanup boundary for `feature/get-currency-context-vm` so the branch can be trimmed back to a reviewable ContextVM BTC pricing PR.
+This document defines the cleanup boundary for `feature/get-currency-context-vm` so the main branch can be trimmed back to a reviewable ContextVM BTC pricing PR.
 
-This is the planning document you read before the transplant and the temporary skip issue, not the final cleanup step.
+The temporary Playwright skips do **not** belong here anymore. They belong on a separate test-fix branch that only carries the inherited failure bucket and its comparison notes.
+
+This is the planning document you read before the pricing-branch trim and the temporary skip issue, not the final cleanup step.
 
 ## Non-goals
 
@@ -80,7 +82,7 @@ Keep the content, but move the files so the feature branch does not accumulate p
 
 ### Temporary CI workaround files
 
-Remove or move these into a follow-up branch, because they are temporary skips tied to the failed E2E investigation:
+These files belong on the separate test-fix branch, not on the main pricing branch. They are temporary skips tied to the inherited E2E investigation:
 
 - `e2e-new/tests/checkout.spec.ts`
 - `e2e-new/tests/marketplace.spec.ts`
@@ -91,7 +93,7 @@ Remove or move these into a follow-up branch, because they are temporary skips t
 - `e2e-new/tests/shipping-special.spec.ts`
 - `e2e-new/test-config.ts`
 
-If the transplant branch needs a minimal subset of these files to keep the comparison investigation reproducible, keep only the smallest possible slice and document why.
+If the test-fix branch needs a minimal subset of these files to keep the comparison investigation reproducible, keep only the smallest possible slice and document why.
 
 ### Social / messages / profile cleanup
 
@@ -116,10 +118,10 @@ If a change does not directly support BTC pricing or the ContextVM server/client
 
 ## Definition of success
 
-The branch is clean enough for review when:
+The pricing branch is clean enough for review when:
 
 1. The currency implementation is intact.
-2. The branch does not contain temporary test skips unless they are explicitly part of the transplant branch and clearly documented.
+2. The pricing branch does not contain temporary test skips.
 3. The handover docs are no longer mixed into the feature path, or are only present because the browser validation still needs them.
 4. The remaining diffs are explainable as pricing feature support.
 

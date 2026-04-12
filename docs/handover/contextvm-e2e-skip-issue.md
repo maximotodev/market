@@ -6,9 +6,9 @@ Temporarily skip failing Playwright tests inherited from `master`
 
 ## Summary
 
-The following Playwright tests were temporarily skipped so CI can move forward while the underlying checkout/payment and product-interaction failures are investigated.
+The following Playwright tests were temporarily skipped so CI can move forward while the inherited checkout/payment and product-interaction failures are investigated.
 
-Create this issue after the transplant branch exists so the issue can reference the transplanted branch and its scope:
+Create this issue after the test-fix branch exists so the issue can reference the transplanted branch and its scope:
 
 - `e2e-new/tests/checkout.spec.ts`
 - `e2e-new/tests/marketplace.spec.ts`
@@ -23,7 +23,7 @@ Create this issue after the transplant branch exists so the issue can reference 
 
 These failures were reproduced on `compare/contextvm-first`, which is the baseline branch used for the comparison and is derived from `master` without the current ContextVM changes. That means the failures do **not** appear to be introduced by the ContextVM branch.
 
-Because the baseline already shows the same failure class, the temporary skips are acceptable as an investigation aid while the transplant branch is being prepared.
+Because the baseline already shows the same failure class, the temporary skips are acceptable as an investigation aid while the test-fix branch is being prepared.
 
 The observed failures were mostly the same class of issues across both branches:
 
@@ -57,7 +57,7 @@ Only the tests that already failed on `compare/contextvm-first` should be skippe
 
 Do **not** expand the skip set beyond the baseline failure bucket unless a new comparison proves the new failure is also pre-existing.
 
-Do not mix this issue up with the final browser cleanup commit; it exists to document the temporary workaround while the transplant is in flight.
+Do not mix this issue up with the final browser cleanup commit for the pricing branch; it exists to document the temporary workaround while the test-fix branch is in flight.
 
 ## Follow-up work
 

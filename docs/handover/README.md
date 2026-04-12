@@ -1,6 +1,11 @@
 # ContextVM cleanup plan index
 
-This folder is the active cleanup checklist for the current ContextVM branch. Use these plans in order, and keep the older notes under `docs/handovers/` around only as long as they are still needed for review or validation.
+This folder is the active cleanup checklist for the current ContextVM work, split into two tracks:
+
+- the main ContextVM pricing branch, which keeps the currency implementation and browser/runtime support
+- the separate test-fix branch, which only carries the inherited Playwright skips and their comparison notes
+
+Use the plans in order, and keep the older notes under `docs/handovers/` around only as long as they are still needed for review or validation.
 
 ## Branch progress checklist
 
@@ -11,17 +16,18 @@ This folder is the active cleanup checklist for the current ContextVM branch. Us
 - [x] Explain that `make browser-contextvm` should stay available until final validation is complete
 - [x] Clarify that archived notes under `docs/handovers/` are still present only for review/validation
 - [x] Clarify that any final removal of `Makefile` or handover docs belongs in the last cleanup step
-- [x] Define the trim boundary for the transplant
+- [x] Define the trim boundary for the pricing branch
 - [x] Draft the inherited-failure issue design doc
 - [x] Draft the inherited-failure GitHub issue body
 - [x] Mark the inherited-failure issue draft as ready to post
 - [x] Draft the temporary skipped Playwright tests issue
+- [x] Clarify that the temporary skips belong on a separate test-fix branch
 
 ### Still to do
 
-- [ ] Move only the relevant fixes onto the follow-up branch
-- [ ] Create the GitHub issue that explains the inherited-from-`master` failures and must be addressed in the transplanted branch
-- [ ] Run `make browser-contextvm` and verify the happy path
+- [ ] Move only the relevant pricing fixes onto the main ContextVM branch if needed
+- [ ] Create the GitHub issue that explains the inherited-from-`master` failures and must be addressed in the test-fix branch
+- [ ] Run `make browser-contextvm` and verify the happy path for the pricing branch
 - [ ] Finish the remaining cleanup commit
 - [ ] Remove handover docs and the `Makefile` only if they are no longer needed
 

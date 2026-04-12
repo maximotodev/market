@@ -2,46 +2,47 @@
 
 ## Goal
 
-Create a fresh follow-up branch that carries only the changes needed to address the issues observed in `compare/contextvm-first`, without keeping the unrelated branch baggage.
+Create a fresh follow-up branch that carries only the inherited Playwright test fixes from `compare/contextvm-first`, without bringing in the ContextVM pricing implementation.
 
-Current follow-up branch candidate: `feature/fix-e2e-flaky-price-and-payment-clean-split`.
+Current test-fix branch candidate: `feature/contextvm-inherited-e2e-skips`.
 
 This is the first execution step before drafting the inherited-failure issue so the issue can reference the transplanted branch.
 
 ## Branch strategy
 
-Start the new branch from the branch that best represents the failure baseline:
+Start the new test-fix branch from the branch that best represents the failure baseline:
 
 - preferred baseline: `compare/contextvm-first`
-- if the fix must be layered on top of the feature implementation, cherry-pick only the narrowly relevant commits from `feature/get-currency-context-vm`
+- do **not** start from `feature/get-currency-context-vm` for this branch, because the pricing implementation belongs on the main ContextVM branch instead
 
 ## What to transplant
 
-Keep only the changes that are directly tied to:
+Keep only the changes that are directly tied to the inherited failure bucket:
 
-- ContextVM BTC pricing behavior
-- the comparison-based investigation of the failing E2E bucket
-- minimal CI or runtime support needed to reproduce/fix the issue
-- any temporary Playwright workaround that is genuinely required to keep the transplant branch reproducible while the root cause is being investigated
+- the temporary Playwright workaround for the skipped tests
+- any minimal comparison/test-support notes required to explain the inherited failures
+- the smallest possible CI or runtime support needed to reproduce the test failures
 
 ## What not to transplant
 
 Do not bring over:
 
+- the ContextVM pricing implementation
+- the browser/runtime client/server/deploy wiring
 - unrelated social/messages/profile/UI changes
 - broad deploy/release overhaul
-- docs that are only about the investigation process, unless they are being kept temporarily so the transplant branch can be tested and explained
-- old E2E suite migration work that is not required for the pricing issue
+- docs that are only about the pricing implementation unless they are being kept temporarily so the test-fix branch can be tested and explained
+- old E2E suite migration work that is not required for the inherited failure bucket
 - any extra temporary skip beyond the minimal baseline-comparison need
 
 ## Recommended procedure
 
 1. Create a new branch from `compare/contextvm-first`.
-2. Cherry-pick only the minimal ContextVM fixes or investigation helpers that are needed.
+2. Cherry-pick or reapply only the minimal test-skip changes that are needed.
 3. Re-run the affected Playwright tests.
 4. Compare the result against the same baseline branch again.
-5. Keep the new branch focused on the specific failure class only.
-6. Keep the Makefile in place for now so the final browser validation can still use it.
+5. Keep the new branch focused on the specific inherited failure bucket only.
+6. Keep the Makefile in place for now only if the test-fix branch still needs it for comparison.
 
 ## Expected outputs from the new branch
 

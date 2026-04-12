@@ -10,14 +10,14 @@ Several Playwright failures were reproduced on the baseline comparison branch (`
 
 Because the baseline branch is derived from `master` without the current ContextVM changes, these failures appear to be inherited straight from `master`, not introduced by the ContextVM branch.
 
-This issue exists to track those failures separately so they can be handled on the transplanted follow-up branch without broadening the pricing PR scope.
+This issue exists to track those failures separately so they can be handled on the test-fix branch without broadening the pricing PR scope.
 
 ## Branches compared
 
 - `compare/contextvm-first` — baseline branch derived from `master`
 - `compare/contextvm-head` — ContextVM head branch
 - `feature/get-currency-context-vm` — current pricing feature branch
-- the transplanted follow-up branch created from `compare/contextvm-first`
+- the test-fix branch created from `compare/contextvm-first`
 
 ## Observed failure bucket
 
@@ -35,7 +35,7 @@ A smaller product-comment reaction visibility failure also appeared in the same 
 
 These failures were already present on the baseline comparison branch, so they do not appear to be introduced by the ContextVM branch.
 
-That means the right place to address them is the transplanted follow-up branch, not the trimmed pricing PR itself.
+That means the right place to address them is the test-fix branch, not the trimmed pricing PR itself.
 
 ## Scope statement
 
@@ -50,7 +50,7 @@ Do **not** use it to:
 
 ## Next step
 
-1. Work from the transplanted follow-up branch.
+1. Work from the test-fix branch.
 2. Reproduce the same checkout/payment failures there.
 3. Keep the scope limited to the inherited failure bucket.
 4. Re-run the same comparison tests after the fix.
@@ -73,6 +73,6 @@ Do **not** use it to:
 > - relay/event publication counts staying at `0`
 > - downstream shipping-special and order-lifecycle failures that depend on the payment UI
 >
-> Because `compare/contextvm-first` is derived from `master` without the current ContextVM changes, these failures appear to be inherited and should be handled on the transplanted follow-up branch instead of widening the pricing PR scope.
+> Because `compare/contextvm-first` is derived from `master` without the current ContextVM changes, these failures appear to be inherited and should be handled on the separate test-fix branch instead of widening the pricing PR scope.
 >
 > Please keep the fix limited to the checkout/payment failure bucket and re-run the same comparison tests after the transplanted branch is updated.
