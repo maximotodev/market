@@ -152,7 +152,7 @@ browser-contextvm: install
 	trap 'kill $$app_pid $$server_pid $$relay_pid >/dev/null 2>&1 || true' EXIT INT TERM; \
 	test_app_private_key="$$(nak key generate)"; \
 	relay_bin="$$(command -v nak 2>/dev/null || printf '%s/go/bin/nak' "$$HOME")"; \
-	"$$relay_bin" serve --hostname 0.0.0.0 >/tmp/contextvm-browser-relay.log 2>&1 & relay_pid=$$!; \
+	"$$relay_bin" serve --port 10547 --hostname 0.0.0.0 >/tmp/contextvm-browser-relay.log 2>&1 & relay_pid=$$!; \
 	i=0; until "$(BUN)" -e 'const r = await fetch("http://localhost:10547"); process.exit(r.status < 500 ? 0 : 1)'; do \
 		i=$$((i + 1)); \
 		if [ $$i -ge 30 ]; then \
