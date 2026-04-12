@@ -4,6 +4,8 @@
 
 Create a fresh follow-up branch that carries only the changes needed to address the issues observed in `compare/contextvm-first`, without keeping the unrelated branch baggage.
 
+This is the first execution step after the skip issue is drafted.
+
 ## Branch strategy
 
 Start the new branch from the branch that best represents the failure baseline:
@@ -18,16 +20,17 @@ Keep only the changes that are directly tied to:
 - ContextVM BTC pricing behavior
 - the comparison-based investigation of the failing E2E bucket
 - minimal CI or runtime support needed to reproduce/fix the issue
+- any temporary Playwright workaround that is genuinely required to keep the transplant branch reproducible while the root cause is being investigated
 
 ## What not to transplant
 
 Do not bring over:
 
-- temporary `test.skip(...)` patches beyond the minimal baseline-comparison need
 - unrelated social/messages/profile/UI changes
 - broad deploy/release overhaul
-- docs that are only about the investigation process
+- docs that are only about the investigation process, unless they are being kept temporarily so the transplant branch can be tested and explained
 - old E2E suite migration work that is not required for the pricing issue
+- any extra temporary skip beyond the minimal baseline-comparison need
 
 ## Recommended procedure
 
@@ -36,6 +39,7 @@ Do not bring over:
 3. Re-run the affected Playwright tests.
 4. Compare the result against the same baseline branch again.
 5. Keep the new branch focused on the specific failure class only.
+6. Keep the Makefile in place for now so the final browser validation can still use it.
 
 ## Expected outputs from the new branch
 
@@ -56,3 +60,5 @@ At minimum, the follow-up branch should be validated against:
 ## Notes
 
 If a change does not help explain or fix the `compare/contextvm-first` failures, leave it out of the transplant branch.
+
+If a temporary skip or documentation file is useful for the transplant branch, keep it only until the browser validation and final cleanup are complete.

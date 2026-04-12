@@ -6,7 +6,9 @@ Temporarily skip failing ContextVM-related Playwright tests in `feature/get-curr
 
 ## Summary
 
-The following Playwright tests were temporarily skipped so CI can move forward while the underlying checkout/payment and product-interaction failures are investigated:
+The following Playwright tests were temporarily skipped so CI can move forward while the underlying checkout/payment and product-interaction failures are investigated.
+
+This issue should be created before the transplant step so the follow-up branch has the reasoning documented up front:
 
 - `e2e-new/tests/checkout.spec.ts`
 - `e2e-new/tests/marketplace.spec.ts`
@@ -20,6 +22,8 @@ The following Playwright tests were temporarily skipped so CI can move forward w
 ## Why these tests were skipped
 
 These failures were reproduced on `compare/contextvm-first`, which is the baseline branch used for the comparison and is derived from `master` without significant feature changes. That means the failures do **not** appear to be introduced uniquely by the ContextVM branch.
+
+Because the baseline already shows the same failure class, the temporary skips are acceptable as an investigation aid while the transplant branch is being prepared.
 
 The observed failures were mostly the same class of issues across both branches:
 
@@ -49,9 +53,11 @@ Useful failure details to mention:
 
 This skip is intentionally narrow and temporary.
 
-Only the tests that already failed on `compare/contextvm-first` should be skipped on the feature branch.
+Only the tests that already failed on `compare/contextvm-first` should be skipped on the feature branch or transplant branch.
 
 Do **not** expand the skip set beyond the baseline failure bucket unless a new comparison proves the new failure is also pre-existing.
+
+Do not mix this issue up with the final browser cleanup commit; it exists to document the temporary workaround while the transplant is in flight.
 
 ## Follow-up work
 
@@ -59,7 +65,8 @@ A future branch should:
 
 1. reproduce the failure on `compare/contextvm-first`
 2. identify whether the checkout/payment timing issue is environmental or logic-related
-3. remove the skips once the real root cause is fixed
+3. carry only the minimum skip/workaround needed for the transplant
+4. remove the skips once the real root cause is fixed
 
 ## Acceptance criteria for closing this issue
 
