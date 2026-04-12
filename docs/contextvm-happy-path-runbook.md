@@ -2,6 +2,24 @@
 
 This runbook starts from a clean local state and walks through the manual end-to-end validation for the ContextVM BTC pricing fallback branch.
 
+## Shortcut: use the Makefile first
+
+If you want the fastest way to validate the happy path, use the Makefile target first:
+
+```bash
+make browser-contextvm
+```
+
+That target brings up the relay, seeds the local environment, starts the ContextVM server, and launches the app for browser validation. It is the quickest way to confirm the end-to-end happy path before stepping through the manual commands below.
+
+If you specifically want the isolated local ContextVM service without the browser app, use:
+
+```bash
+make dev-contextvm
+```
+
+The rest of this runbook explains the same flow step by step so you can troubleshoot individual pieces when needed.
+
 ## Goal
 
 Verify all of the following on a fresh local run:
@@ -28,16 +46,16 @@ Verify all of the following on a fresh local run:
 
 ## Clean start checklist
 
-- [ ] Stop any running currency server
-- [ ] Stop any running app/dev server
-- [ ] Start the relay
-- [ ] Clear the currency cache files
-- [ ] Create or refresh `.env.local`
-- [ ] Start the currency server
-- [ ] Run the BTC price fetch twice
-- [ ] Start the app
-- [ ] Open the product page and verify fiat pricing
-- [ ] Stop the currency server and confirm Yadio fallback in the browser network panel
+- [x] Stop any running currency server
+- [x] Stop any running app/dev server
+- [x] Start the relay
+- [x] Clear the currency cache files
+- [x] Create or refresh `.env.local`
+- [x] Start the currency server
+- [x] Run the BTC price fetch twice
+- [x] Start the app
+- [x] Open the product page and verify fiat pricing
+- [x] Stop the currency server and confirm Yadio fallback in the browser network panel
 
 ## Step 1: start the relay
 

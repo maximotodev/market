@@ -205,3 +205,23 @@ You can paste the following into the GitHub PR thread to summarize what was comp
 > - Removed the temporary compatibility wrapper reference from `ctxcn.config.json` and documented the checked-in client as the source of truth.
 >
 > In short: the ContextVM currency work from PR #735 has been carried forward here with the review feedback applied and the branch trimmed to the final pricing-focused scope.
+
+## Paste-ready GitHub comment for the Yadio fallback test
+
+You can paste the following into the GitHub PR thread to explain how to verify the fallback path once the ContextVM server is turned off:
+
+> I verified the browser happy path with ContextVM enabled. To test the fallback behavior, stop the ContextVM server and refresh the product page.
+>
+> Suggested steps:
+>
+> 1. Start the browser validation flow with `make browser-contextvm`.
+> 2. Confirm the page logs `ContextVM BTC fetch succeeded` while the server is running.
+> 3. Stop the ContextVM server process only, leaving the app and relay running.
+> 4. Refresh `/products`.
+> 5. Confirm the console shows `Falling back to Yadio BTC rates` and that fiat pricing still renders.
+>
+> Expected result:
+>
+> - The browser should no longer receive a ContextVM response.
+> - The app should fall back to Yadio automatically.
+> - Pricing should continue to render, proving the non-ContextVM path still works.
