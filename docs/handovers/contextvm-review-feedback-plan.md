@@ -41,6 +41,7 @@ If any of those are missing, restore them first.
 ## Remaining feedback that still needs a decision or cleanup
 
 ### 1) Client naming is still not fully settled
+
 The review thread suggested cleaner naming, but the agreed target for this branch is:
 
 - file: `src/lib/ctxcn-client.ts`
@@ -51,6 +52,7 @@ Your job is to keep that naming consistent across imports, tests, config, and do
 If a future broader ContextVM client is introduced, that can be revisited later, but this PR should stay on `PlebianCurrencyClient`.
 
 ### 2) The legacy wrapper should be removed
+
 A "compatibility wrapper" is a thin old-import-path module that is kept around temporarily so older code keeps working while the real implementation is moved to the checked-in client.
 
 In this branch, there is no wrapper file left in `src/lib/`, so the remaining cleanup was to remove stale references such as:
@@ -61,6 +63,7 @@ In this branch, there is no wrapper file left in `src/lib/`, so the remaining cl
 The checked-in client is the source of truth now, so the docs should say that the wrapper is gone.
 
 ### 3) Test script generalization should stay generalized
+
 The reviewer explicitly asked not to hardcode a narrow list of tests in package scripts.
 
 Verify that `package.json` still uses generalized commands like:
@@ -71,6 +74,7 @@ Verify that `package.json` still uses generalized commands like:
 Do not regress to a hardcoded currency-only file list.
 
 ### 4) Deployment naming / environment wiring should remain consistent
+
 Check for consistency across:
 
 - `.env.example`
@@ -90,6 +94,7 @@ The goal is to avoid a mismatch like:
 - production-only public relay announcements accidentally leaking into non-production
 
 ### 5) Keep the generated client checked in
+
 One review comment explicitly asked to check in the generated client artifact.
 
 Do **not** replace the browser-safe client with an SDK path that depends on browser-unfriendly behavior.
@@ -181,3 +186,22 @@ When you finish, report back with:
 ## Bottom line
 
 Treat this as the **final polish pass** for the currency PR after trimming scope. Keep it narrow, keep it consistent, and do not pull in unrelated work.
+
+## Paste-ready GitHub comment
+
+You can paste the following into the GitHub PR thread to summarize what was completed from the previous review on [PR #735](https://github.com/PlebeianApp/market/pull/735):
+
+> This pull request replaces [PR #735](https://github.com/PlebeianApp/market/pull/735).
+>
+> Completed items from that review:
+>
+> - Renamed the server key/env var to `CVM_SERVER_KEY`.
+> - Switched the app to the checked-in browser-safe ContextVM client (`src/lib/ctxcn-client.ts`).
+> - Kept the generated client checked into the repo so the browser path does not depend on a browser-unfriendly SDK wrapper.
+> - Generalized `test:unit` and `test:integration` so they are no longer hardcoded to a narrow currency-only file list.
+> - Added deploy support so the ContextVM server starts alongside the app.
+> - Restricted public relay announcements to production only.
+> - Kept the currency feature configurable and environment-aware.
+> - Removed the temporary compatibility wrapper reference from `ctxcn.config.json` and documented the checked-in client as the source of truth.
+>
+> In short: the ContextVM currency work from PR #735 has been carried forward here with the review feedback applied and the branch trimmed to the final pricing-focused scope.
