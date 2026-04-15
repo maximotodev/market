@@ -546,11 +546,11 @@ test.describe('Product Page - Interactions & Social (Authenticated)', () => {
 
 		// Seed a reaction from someone else, then we add ours
 		await seedExistingReaction('👀')
+		await seedExistingReaction('👀', devUser2.sk)
 
 		await buyerPage.goto(`/products/${currentProductId}`)
 
 		const reactionBtn = getReactionsList(buyerPage).getByRole('button', { name: '👀' })
-		await reactionBtn.click()
 
 		// Now try to remove it by clicking the button again (toggle behavior)
 		await reactionBtn.click()
