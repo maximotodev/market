@@ -1,4 +1,3 @@
-// e2e-new/tests/product-page-view.spec.ts
 import { test, expect } from '../fixtures'
 import { Relay } from 'nostr-tools/relay'
 import { RELAY_URL } from 'e2e-new/test-config'
@@ -544,13 +543,13 @@ test.describe('Product Page - Interactions & Social (Authenticated)', () => {
 	test('can remove a reaction by clicking the existing one in the list', async ({ buyerPage }) => {
 		if (!currentProductId) throw new Error('Product not seeded')
 
-		// Seed a reaction from someone else, then we add ours
-		await seedExistingReaction('👀')
+		// Seed a reaction from someone else as well as own user
+		await seedExistingReaction('👀', devUser3.sk)
+		await seedExistingReaction('👀', devUser2.sk)
 
 		await buyerPage.goto(`/products/${currentProductId}`)
 
 		const reactionBtn = getReactionsList(buyerPage).getByRole('button', { name: '👀' })
-		await reactionBtn.click()
 
 		// Now try to remove it by clicking the button again (toggle behavior)
 		await reactionBtn.click()
