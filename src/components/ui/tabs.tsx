@@ -47,7 +47,7 @@ function TabsTrigger({
         "disabled:pointer-events-none disabled:opacity-50",
         // "data-[state=active]:bg-secondary data-[state=active]:shadow-sm",
         "data-[state=active]:text-white",
-        "disabled:border-0 disabled:opacity-100",
+        "disabled:border-0",
         className
       )}
       {...props}

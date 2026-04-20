@@ -1,6 +1,5 @@
 import { Button } from '@/components/ui/button'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import type { ProductWorkflowResolution } from '@/lib/workflow/productWorkflowResolver'
 import { authStore } from '@/lib/stores/auth'
 import { ndkActions } from '@/lib/stores/ndk'
@@ -336,8 +335,23 @@ export function ProductFormContent({
 		}
 	}, [activeTab])
 
+	const isTabDisabled = useCallback(
+		(targetTab: ProductFormTab): boolean => {
+			if (editingProductId) return false
+			if (targetTab === activeTab) return false
+
+			const currentIndex = PRODUCT_FORM_TAB_ORDER.indexOf(activeTab)
+			const targetIndex = PRODUCT_FORM_TAB_ORDER.indexOf(targetTab)
+			if (targetIndex <= currentIndex) return false
+
+			return getFirstBlockingTab(formState, targetTab) !== null
+		},
+		[activeTab, editingProductId, formState],
+	)
+
 	const previousTab = getAdjacentTab(activeTab, 'previous')
 	const isCurrentTabBlocked = currentTabValidationIssues.length > 0
+	const footerValidationIssues = activeTab === 'shipping' || editingProductId ? formValidationIssues : currentTabValidationIssues
 
 	return (
 		<form
@@ -356,22 +370,25 @@ export function ProductFormContent({
 					<TabsList className="w-full bg-transparent h-auto p-0 flex flex-wrap gap-[1px]">
 						<TabsTrigger
 							value="name"
+							disabled={isTabDisabled('name')}
 							className="flex-1 px-4 py-2 text-xs font-medium data-[state=active]:bg-secondary data-[state=active]:text-white data-[state=inactive]:bg-gray-100 data-[state=inactive]:text-black rounded-none"
 							data-testid="product-tab-name"
 						>
 							Name
-							{validationIssuesByTab.name.length > 0 && <span className="ml-1 text-red-500">*</span>}
+							<span className="ml-1 text-red-500">*</span>
 						</TabsTrigger>
 						<TabsTrigger
 							value="detail"
+							disabled={isTabDisabled('detail')}
 							className="flex-1 px-4 py-2 text-xs font-medium data-[state=active]:bg-secondary data-[state=active]:text-white data-[state=inactive]:bg-gray-100 data-[state=inactive]:text-black rounded-none"
 							data-testid="product-tab-detail"
 						>
 							Detail
-							{validationIssuesByTab.detail.length > 0 && <span className="ml-1 text-red-500">*</span>}
+							<span className="ml-1 text-red-500">*</span>
 						</TabsTrigger>
 						<TabsTrigger
 							value="spec"
+							disabled={isTabDisabled('spec')}
 							className="flex-1 px-4 py-2 text-xs font-medium data-[state=active]:bg-secondary data-[state=active]:text-white data-[state=inactive]:bg-gray-100 data-[state=inactive]:text-black rounded-none"
 							data-testid="product-tab-spec"
 						>
@@ -379,27 +396,30 @@ export function ProductFormContent({
 						</TabsTrigger>
 						<TabsTrigger
 							value="category"
+							disabled={isTabDisabled('category')}
 							className="flex-1 px-4 py-2 text-xs font-medium data-[state=active]:bg-secondary data-[state=active]:text-white data-[state=inactive]:bg-gray-100 data-[state=inactive]:text-black rounded-none"
 							data-testid="product-tab-category"
 						>
 							Category
-							{validationIssuesByTab.category.length > 0 && <span className="ml-1 text-red-500">*</span>}
+							<span className="ml-1 text-red-500">*</span>
 						</TabsTrigger>
 						<TabsTrigger
 							value="images"
+							disabled={isTabDisabled('images')}
 							className="flex-1 px-4 py-2 text-xs font-medium data-[state=active]:bg-secondary data-[state=active]:text-white data-[state=inactive]:bg-gray-100 data-[state=inactive]:text-black rounded-none"
 							data-testid="product-tab-images"
 						>
 							Images
-							{validationIssuesByTab.images.length > 0 && <span className="ml-1 text-red-500">*</span>}
+							<span className="ml-1 text-red-500">*</span>
 						</TabsTrigger>
 						<TabsTrigger
 							value="shipping"
+							disabled={isTabDisabled('shipping')}
 							className="flex-1 px-4 py-2 text-xs font-medium data-[state=active]:bg-secondary data-[state=active]:text-white data-[state=inactive]:bg-gray-100 data-[state=inactive]:text-black rounded-none"
 							data-testid="product-tab-shipping"
 						>
 							Shipping
-							{validationIssuesByTab.shipping.length > 0 && <span className="ml-1 text-red-500">*</span>}
+							<span className="ml-1 text-red-500">*</span>
 						</TabsTrigger>
 					</TabsList>
 
@@ -433,6 +453,18 @@ export function ProductFormContent({
 
 			{showFooter && (
 				<div className="bg-white border-t pt-4 pb-4 mt-4">
+					{footerValidationIssues.length > 0 && (
+						<div
+							className="mb-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
+							data-testid="product-validation-summary"
+						>
+							<ul className="list-disc list-inside space-y-1">
+								{footerValidationIssues.map((issue, i) => (
+									<li key={i}>{issue}</li>
+								))}
+							</ul>
+						</div>
+					)}
 					<div className="flex gap-2 w-full">
 						{previousTab && (
 							<Button
@@ -468,97 +500,55 @@ export function ProductFormContent({
 									// Check if we need V4V setup for new products
 									if (resolvedWorkflow.requiresV4VSetup && !editingProductId && !hasValidationErrors) {
 										return (
-											<TooltipProvider>
-												<Tooltip>
-													<TooltipTrigger asChild>
-														<Button
-															type="button"
-															variant="secondary"
-															className="flex-1 uppercase"
-															onClick={() => {
-																const publishCallback = async () => {
-																	// After V4V setup, trigger the form submission
-																	form.handleSubmit()
-																}
-																uiActions.openDialog('v4v-setup', publishCallback)
-															}}
-															data-testid="product-setup-v4v-button"
-														>
-															Setup V4V First
-														</Button>
-													</TooltipTrigger>
-													<TooltipContent>
-														<p>You need to configure Value for Value (V4V) settings before publishing your first product</p>
-													</TooltipContent>
-												</Tooltip>
-											</TooltipProvider>
+											<Button
+												type="button"
+												variant="secondary"
+												className="flex-1 uppercase"
+												tooltip="You need to configure Value for Value (V4V) settings before publishing your first product"
+												onClick={() => {
+													const publishCallback = async () => {
+														// After V4V setup, trigger the form submission
+														form.handleSubmit()
+													}
+													uiActions.openDialog('v4v-setup', publishCallback)
+												}}
+												data-testid="product-setup-v4v-button"
+											>
+												Setup V4V First
+											</Button>
 										)
 									}
 
 									return (
-										<TooltipProvider>
-											<Tooltip>
-												<TooltipTrigger asChild>
-													<span className="flex-1">
-														<Button
-															type="submit"
-															variant="secondary"
-															className="w-full uppercase"
-															disabled={isDisabled}
-															data-testid="product-publish-button"
-														>
-															{isSubmitting || isPublishing
-																? editingProductId
-																	? 'Updating...'
-																	: 'Publishing...'
-																: editingProductId
-																	? 'Update Product'
-																	: 'Publish Product'}
-														</Button>
-													</span>
-												</TooltipTrigger>
-												{hasValidationErrors && (
-													<TooltipContent>
-														<ul className="list-disc list-inside space-y-1">
-															{formValidationIssues.map((issue, i) => (
-																<li key={i}>{issue}</li>
-															))}
-														</ul>
-													</TooltipContent>
-												)}
-											</Tooltip>
-										</TooltipProvider>
+										<Button
+											type="submit"
+											variant="secondary"
+											className="flex-1 uppercase"
+											disabled={isDisabled}
+											data-testid="product-publish-button"
+										>
+											{isSubmitting || isPublishing
+												? editingProductId
+													? 'Updating...'
+													: 'Publishing...'
+												: editingProductId
+													? 'Update Product'
+													: 'Publish Product'}
+										</Button>
 									)
 								}}
 							/>
 						) : (
-							<TooltipProvider>
-								<Tooltip>
-									<TooltipTrigger asChild>
-										<span className="flex-1">
-											<Button
-												type="button"
-												variant="secondary"
-												className="w-full uppercase"
-												onClick={handleNext}
-												disabled={isCurrentTabBlocked}
-												data-testid="product-next-button"
-											>
-												Next
-											</Button>
-										</span>
-									</TooltipTrigger>
-									{isCurrentTabBlocked && (
-										<TooltipContent>
-											<ul className="list-disc list-inside space-y-1">
-												{currentTabValidationIssues.map((issue, i) => (
-													<li key={i}>{issue}</li>
-												))}
-											</ul>
-										</TooltipContent>
-									)}
-								</Tooltip>
-							</TooltipProvider>
+							<Button
+								type="button"
+								variant="secondary"
+								className="flex-1 uppercase"
+								onClick={handleNext}
+								disabled={isCurrentTabBlocked}
+								data-testid="product-next-button"
+							>
+								Next
+							</Button>
 						)}
 					</div>
 				</div>
