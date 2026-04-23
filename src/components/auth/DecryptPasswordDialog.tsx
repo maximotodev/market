@@ -1,9 +1,11 @@
+// components/dialogs/DecryptPasswordDialog.tsx
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useAuth } from '@/lib/stores/auth'
 import { Loader2 } from 'lucide-react'
+import { decrypt } from 'nostr-tools/nip49'
 import { useState } from 'react'
 
 export function DecryptPasswordDialog() {
@@ -21,9 +23,11 @@ export function DecryptPasswordDialog() {
 		try {
 			setIsLoading(true)
 			setError('')
+
+			// Login with the decrypted key
 			await decryptAndLogin(password)
 		} catch (error) {
-			setError(error instanceof Error ? error.message : 'Failed to decrypt key')
+			setError('Failed to decrypt key. Please check your password.')
 		} finally {
 			setIsLoading(false)
 		}

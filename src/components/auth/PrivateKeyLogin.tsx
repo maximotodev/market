@@ -5,6 +5,7 @@ import { authActions, NOSTR_LOCAL_ENCRYPTED_SIGNER_KEY } from '@/lib/stores/auth
 import { generateSecretKey, getPublicKey, nip19 } from 'nostr-tools'
 import { useEffect, useRef, useState } from 'react'
 import { Copy, Eye, EyeOff, Loader2 } from 'lucide-react'
+import { decrypt, encrypt } from 'nostr-tools/nip49'
 
 interface PrivateKeyLoginProps {
 	onError?: (error: string) => void
@@ -31,6 +32,7 @@ export function PrivateKeyLogin({ onError, onSuccess }: PrivateKeyLoginProps) {
 		if (storedKey) {
 			setHasStoredKey(true)
 			try {
+				// Extract pubkey from stored key format: "pubkey:ncryptsec..."
 				const [pubkey] = storedKey.split(':')
 				setStoredPubkey(pubkey)
 			} catch (e) {
@@ -73,17 +75,23 @@ export function PrivateKeyLogin({ onError, onSuccess }: PrivateKeyLoginProps) {
 		return trimmedKey
 	}
 
+	// Encrypt and store key using nostr-tools encrypt function
 	const encryptAndStoreKey = async (key: string, password: string) => {
 		try {
 			const normalizedKey = normalizePrivateKey(key)
-			const secretKeyBytes = nip19.decode(normalizedKey).data as Uint8Array
+			const { data: secretKeyBytes } = nip19.decode(normalizedKey) as { data: Uint8Array }
 			const pubkey = getPublicKey(secretKeyBytes)
-			const encryptedKey = `${pubkey}:${normalizedKey}`
-			localStorage.setItem(NOSTR_LOCAL_ENCRYPTED_SIGNER_KEY, encryptedKey)
+
+			// Use nostr-tools encrypt function
+			const encryptedKey = encrypt(secretKeyBytes, password) // Encrypt with default parameters (logN = 16, ksb = 2)
+
+			// Store in format: "pubkey:ncryptsec..."
+			const storedFormat = `${pubkey}:${encryptedKey}`
+			localStorage.setItem(NOSTR_LOCAL_ENCRYPTED_SIGNER_KEY, storedFormat)
 			setHasStoredKey(true)
 			setStoredPubkey(pubkey)
 		} catch (error) {
-			throw new Error('Failed to encrypt and store key')
+			throw new Error(`Failed to encrypt and store key: ${error instanceof Error ? error.message : 'Unknown error'}`)
 		}
 	}
 
@@ -129,12 +137,18 @@ export function PrivateKeyLogin({ onError, onSuccess }: PrivateKeyLoginProps) {
 			return
 		}
 
+		if (process.env.NODE_ENV === 'production' && encryptionPassword.length < 8) {
+			setPasswordError('Password must be at least 8 characters long')
+			return
+		}
+
 		try {
 			setIsLoading(true)
+			setPasswordError('')
 			await encryptAndStoreKey(privateKey, encryptionPassword)
 			await handleValidatePrivateKey()
 		} catch (error) {
-			setPasswordError(error instanceof Error ? error.message : 'Failed to encrypt and store key')
+			setPasswordError('Failed to encrypt and store key')
 		} finally {
 			setIsLoading(false)
 		}
@@ -148,16 +162,28 @@ export function PrivateKeyLogin({ onError, onSuccess }: PrivateKeyLoginProps) {
 
 		try {
 			setIsLoading(true)
+			setPasswordError('')
+
 			const storedKey = localStorage.getItem(NOSTR_LOCAL_ENCRYPTED_SIGNER_KEY)
 			if (!storedKey) {
 				throw new Error('No stored key found')
 			}
 
-			const [, key] = storedKey.split(':')
-			await authActions.loginWithPrivateKey(key)
+			// Extract the ncryptsec part (format: "pubkey:ncryptsec...")
+			const [, encryptedKey] = storedKey.split(':')
+
+			// Use nostr-tools decrypt function
+			const decryptedBytes = decrypt(encryptedKey, encryptionPassword)
+
+			// Convert Uint8Array to hex string
+			const privateKeyHex = Array.from(decryptedBytes)
+				.map((byte) => byte.toString(16).padStart(2, '0'))
+				.join('')
+
+			await authActions.loginWithPrivateKey(privateKeyHex)
 			onSuccess?.()
 		} catch (error) {
-			setPasswordError(error instanceof Error ? error.message : 'Failed to decrypt key')
+			setPasswordError('Failed to decrypt key. Please check your password.')
 		} finally {
 			setIsLoading(false)
 		}
