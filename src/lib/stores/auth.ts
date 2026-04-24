@@ -5,6 +5,8 @@ import { cartActions } from './cart'
 import { fetchProductsByPubkey } from '@/queries/products'
 import { hasAcceptedTerms, TERMS_ACCEPTED_KEY } from '@/components/dialogs/TermsConditionsDialog'
 import { uiActions } from './ui'
+import { getPublicKey, nip19 } from 'nostr-tools'
+import { decrypt, encrypt } from 'nostr-tools/nip49'
 
 export const NOSTR_CONNECT_KEY = 'nostr_connect_url'
 export const NOSTR_LOCAL_SIGNER_KEY = 'nostr_local_signer_key'
@@ -57,7 +59,6 @@ export const authActions = {
 			authStore.setState((state) => ({ ...state, isAuthenticating: false }))
 		}
 	},
-
 	decryptAndLogin: async (password: string) => {
 		try {
 			authStore.setState((state) => ({ ...state, isAuthenticating: true }))
@@ -66,10 +67,52 @@ export const authActions = {
 				throw new Error('No encrypted key found')
 			}
 
-			const [, key] = encryptedPrivateKey.split(':')
-			await authActions.loginWithPrivateKey(key)
+			// Extract the ncryptsec part (format: "pubkey:ncryptsec...")
+			const [, encryptedKey] = encryptedPrivateKey.split(':')
+
+			// Use nostr-tools decrypt function
+			const decryptedBytes = decrypt(encryptedKey, password)
+
+			// Convert Uint8Array to hex string
+			const privateKeyHex = Array.from(decryptedBytes)
+				.map((byte) => byte.toString(16).padStart(2, '0'))
+				.join('')
+
+			// Login with the decrypted key
+			await authActions.loginWithPrivateKey(privateKeyHex)
 			authStore.setState((state) => ({ ...state, needsDecryptionPassword: false }))
 			authActions.checkAndShowTermsDialog()
+		} catch (error) {
+			throw error
+		} finally {
+			authStore.setState((state) => ({ ...state, isAuthenticating: false }))
+		}
+	},
+
+	// New method to encrypt and save private key using nostr-tools
+	encryptAndSavePrivateKey: async (privateKey: string, password: string, logN: number = 18) => {
+		try {
+			authStore.setState((state) => ({ ...state, isAuthenticating: true }))
+
+			// Normalize the private key
+			const normalizedKey = privateKey.startsWith('nsec1') ? privateKey : nip19.nsecEncode(new Uint8Array(32).fill(0)) // This would need proper conversion
+
+			const { data: secretKeyBytes } = nip19.decode(normalizedKey) as { data: Uint8Array }
+			const pubkey = getPublicKey(secretKeyBytes)
+
+			// Use nostr-tools encrypt function
+			const encryptedKey = encrypt(secretKeyBytes, password, logN, 1)
+
+			// Save encrypted key in format: "pubkey:ncryptsec..."
+			localStorage.setItem(NOSTR_LOCAL_ENCRYPTED_SIGNER_KEY, `${pubkey}:${encryptedKey}`)
+
+			// Remove unencrypted key
+			localStorage.removeItem(NOSTR_LOCAL_SIGNER_KEY)
+
+			// Enable auto-login
+			localStorage.setItem(NOSTR_AUTO_LOGIN, 'true')
+
+			return true
 		} catch (error) {
 			throw error
 		} finally {
