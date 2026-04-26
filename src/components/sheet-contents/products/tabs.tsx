@@ -688,10 +688,12 @@ export function ShippingTab() {
 	}, [getUser])
 
 	const shippingOptionsQuery = useShippingOptionsByPubkey(user?.pubkey || '')
+	const hasResolvedSellerShippingState = shippingOptionsQuery.isSuccess || shippingOptionsQuery.data !== undefined
+	const sellerShippingStateIsUnresolvedError = !hasResolvedSellerShippingState && shippingOptionsQuery.isError
 
 	// Quick-create a shipping option from template
 	const handleQuickCreate = async (template: (typeof QUICK_SHIPPING_TEMPLATES)[number]) => {
-		if (isCreatingShipping || !user?.pubkey) return
+		if (isCreatingShipping || !user?.pubkey || !hasResolvedSellerShippingState) return
 
 		// For pickup, show the address form instead of creating immediately
 		if (template.service === 'pickup') {
@@ -727,7 +729,7 @@ export function ShippingTab() {
 
 	// Handle pickup address form submission
 	const handlePickupSubmit = async () => {
-		if (!user?.pubkey) return
+		if (!user?.pubkey || !hasResolvedSellerShippingState) return
 
 		// Validate required fields
 		if (!pickupAddress.street.trim()) {
@@ -791,6 +793,8 @@ export function ShippingTab() {
 	}, [shippingOptionsQuery.data, user?.pubkey])
 
 	const addShippingOption = (option: RichShippingInfo) => {
+		if (!hasResolvedSellerShippingState) return
+
 		const nextShippings = attachShippingOptionByRef(productFormStore.state.shippings, option.id)
 
 		if (nextShippings === productFormStore.state.shippings) {
@@ -943,7 +947,9 @@ export function ShippingTab() {
 					<h3 className="font-medium">Saved Merchant Shipping Options</h3>
 					<p className="text-sm text-gray-500">Reusable seller-level shipping options that can be attached to this product.</p>
 				</div>
-				{shippingOptionsQuery.isLoading ? (
+				{!hasResolvedSellerShippingState && sellerShippingStateIsUnresolvedError ? (
+					<div className="p-4 border rounded-md text-sm text-amber-600">Saved merchant shipping options are unavailable right now.</div>
+				) : !hasResolvedSellerShippingState ? (
 					<div className="flex items-center justify-center p-8">
 						<Loader2 className="w-6 h-6 animate-spin" />
 						<span className="ml-2">Loading shipping options...</span>
@@ -985,7 +991,16 @@ export function ShippingTab() {
 					<p className="text-sm text-gray-500">Common merchant-level templates that have not been saved for this seller yet.</p>
 				</div>
 
-				{showPickupForm ? (
+				{!hasResolvedSellerShippingState && sellerShippingStateIsUnresolvedError ? (
+					<div className="p-4 border rounded-md text-sm text-amber-600">
+						Quick-create templates are unavailable until seller shipping options resolve.
+					</div>
+				) : !hasResolvedSellerShippingState ? (
+					<div className="flex items-center justify-center p-8">
+						<Loader2 className="w-6 h-6 animate-spin" />
+						<span className="ml-2">Loading quick-create templates...</span>
+					</div>
+				) : showPickupForm ? (
 					<div className="border rounded-md p-4 space-y-4 bg-gray-50">
 						<div className="flex items-center gap-2">
 							<PackageIcon className="w-5 h-5 text-green-500" />
