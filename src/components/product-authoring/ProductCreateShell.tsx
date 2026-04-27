@@ -56,7 +56,7 @@ export function ProductCreateShell({ userPubkey, className = '', formClassName, 
 
 		hasBootstrappedRef.current = true
 		setIsBootstrapped(true)
-	}, [workflow.initialTab, workflow.isBootstrapReady])
+	}, [normalizedUserPubkey, workflow.initialTab, workflow.isBootstrapReady])
 
 	const content =
 		!workflow.isBootstrapReady || !isBootstrapped ? (
