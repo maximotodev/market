@@ -1,12 +1,23 @@
+import { ProductAuthoringStageNavigator } from '@/components/product-authoring/ProductAuthoringStageNavigator'
 import { Button } from '@/components/ui/button'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import type { ProductWorkflowResolution } from '@/lib/workflow/productWorkflowResolver'
 import { authStore } from '@/lib/stores/auth'
 import { ndkActions } from '@/lib/stores/ndk'
-import { productFormActions, productFormStore, type ProductFormTab } from '@/lib/stores/product'
+import { productFormActions, productFormStore } from '@/lib/stores/product'
 import { uiActions } from '@/lib/stores/ui'
 import { hasProductFormDraft } from '@/lib/utils/productFormStorage'
+import {
+	getNextProductAuthoringStage,
+	getPreviousProductAuthoringStage,
+	getPrimaryProductAuthoringTabForStage,
+	getProductAuthoringStageForTab,
+	getProductAuthoringTabsForStage,
+	PRODUCT_AUTHORING_V4V_SETUP_ISSUE,
+	resolveProductAuthoringStages,
+	type ProductAuthoringStage,
+	type ProductAuthoringStageResolution,
+} from '@/lib/workflow/productAuthoringStages'
 import { validateProductDraft } from '@/lib/workflow/productDraftValidation'
 import { createShippingReference, getShippingInfo, useShippingOptionsByPubkey, isShippingDeleted } from '@/queries/shipping'
 import { useForm } from '@tanstack/react-form'
@@ -24,12 +35,20 @@ export function ProductFormContent({
 	productDTag,
 	productEventId,
 	workflow,
+	stageResolution,
+	onStageSelect,
+	onStageBack,
+	onStageNext,
 }: {
 	className?: string
 	showFooter?: boolean
 	productDTag?: string | null
 	productEventId?: string | null
 	workflow?: ProductWorkflowResolution
+	stageResolution?: ProductAuthoringStageResolution
+	onStageSelect?: (stage: ProductAuthoringStage) => void
+	onStageBack?: () => void
+	onStageNext?: () => void
 }) {
 	const [isPublishing, setIsPublishing] = useState(false)
 	const [hasDraft, setHasDraft] = useState(false)
@@ -38,7 +57,10 @@ export function ProductFormContent({
 
 	// Get form state from store, including editingProductId
 	const formState = useStore(productFormStore)
-	const { activeTab, editingProductId, isDirty, shippings } = formState
+	const { activeTab, editingProductId, isDirty } = formState
+	const [editCompatibilityStage, setEditCompatibilityStage] = useState<ProductAuthoringStage>(() =>
+		getProductAuthoringStageForTab(activeTab),
+	)
 	const resolvedWorkflow: ProductWorkflowResolution = workflow ?? {
 		mode: editingProductId ? 'edit' : 'create',
 		isBootstrapReady: true,
@@ -59,8 +81,8 @@ export function ProductFormContent({
 	const authState = useStore(authStore)
 	const userPubkey = authState.user?.pubkey || ''
 
-	// Check if user has any shipping options configured (for tab ordering)
-	// Query is only enabled when userPubkey is available
+	// Resolve seller shipping references for draft validation.
+	// Query is only enabled when userPubkey is available.
 	const { data: userShippingOptions, isFetched: isShippingFetched } = useShippingOptionsByPubkey(userPubkey)
 
 	const resolvedShippingRefs = useMemo(() => {
@@ -89,18 +111,60 @@ export function ProductFormContent({
 			}),
 		[formState, isShippingFetched, resolvedShippingRefs],
 	)
+	const editCompatibilityStageResolution = useMemo(() => {
+		if (stageResolution || resolvedWorkflow.mode !== 'edit') return null
 
-	const hasSelectedShipping = useMemo(() => {
-		return shippings.some((ship) => !!ship.shippingRef)
-	}, [shippings])
+		return resolveProductAuthoringStages({
+			selectedStage: editCompatibilityStage,
+			validation: draftValidation,
+			workflow: resolvedWorkflow,
+		})
+	}, [draftValidation, editCompatibilityStage, resolvedWorkflow, stageResolution])
+	const isMissingShellStageResolution = !stageResolution && !editCompatibilityStageResolution
+	const resolvedStageResolution =
+		stageResolution ??
+		editCompatibilityStageResolution ??
+		resolveProductAuthoringStages({
+			selectedStage: 'basics',
+			validation: draftValidation,
+			workflow: resolvedWorkflow,
+		})
 
-	// Once the draft has a shipping reference, move out of the shipping-first bootstrap step
-	// without waiting for query cache propagation to catch up.
-	useEffect(() => {
-		if (resolvedWorkflow.shouldStartAtShipping && hasSelectedShipping && activeTab === 'shipping') {
-			productFormActions.setActiveTab('name')
+	const selectedStage = resolvedStageResolution.selectedStage
+	const renderedTabs = getProductAuthoringTabsForStage(selectedStage)
+	const previousStage = getPreviousProductAuthoringStage(selectedStage)
+	const nextStage = getNextProductAuthoringStage(selectedStage)
+	const selectStage = useCallback(
+		(stage: ProductAuthoringStage) => {
+			if (onStageSelect) {
+				onStageSelect(stage)
+				return
+			}
+
+			setEditCompatibilityStage(stage)
+			const primaryTab = getPrimaryProductAuthoringTabForStage(stage)
+			if (primaryTab) {
+				productFormActions.setActiveTab(primaryTab)
+			}
+		},
+		[onStageSelect],
+	)
+	const handleBack = useCallback(() => {
+		if (onStageBack) {
+			onStageBack()
+			return
 		}
-	}, [resolvedWorkflow.shouldStartAtShipping, hasSelectedShipping, activeTab])
+
+		if (previousStage) selectStage(previousStage)
+	}, [onStageBack, previousStage, selectStage])
+	const handleNext = useCallback(() => {
+		if (onStageNext) {
+			onStageNext()
+			return
+		}
+
+		if (nextStage) selectStage(nextStage)
+	}, [nextStage, onStageNext, selectStage])
 
 	// Check for persisted draft on mount (for drafts from previous sessions)
 	const checkForPersistedDraft = useCallback(async () => {
@@ -226,6 +290,40 @@ export function ProductFormContent({
 		},
 	})
 
+	const selectedStageContent =
+		selectedStage === 'publish' ? (
+			<div className="mt-4 space-y-4 rounded-lg border bg-gray-50 p-4">
+				<div>
+					<h3 className="text-sm font-semibold">Ready to publish</h3>
+					<p className="text-sm text-muted-foreground">
+						Review the required checks below, then publish when the draft and seller setup are ready.
+					</p>
+				</div>
+				{resolvedStageResolution.publishIssues.length > 0 ? (
+					<ul className="list-disc list-inside space-y-1 text-sm text-red-600">
+						{resolvedStageResolution.publishIssues.map((issue) => (
+							<li key={issue}>{issue}</li>
+						))}
+					</ul>
+				) : (
+					<p className="text-sm text-green-700">All required product details and seller setup checks are complete.</p>
+				)}
+			</div>
+		) : (
+			<div className="mt-4 space-y-6">
+				{renderedTabs.includes('name') ? <NameTab /> : null}
+				{renderedTabs.includes('detail') ? <DetailTab /> : null}
+				{renderedTabs.includes('spec') ? <SpecTab /> : null}
+				{renderedTabs.includes('category') ? <CategoryTab /> : null}
+				{renderedTabs.includes('images') ? <ImagesTab /> : null}
+				{renderedTabs.includes('shipping') ? <ShippingTab /> : null}
+			</div>
+		)
+
+	if (isMissingShellStageResolution) {
+		throw new Error('ProductFormContent requires shell-owned stageResolution in create mode')
+	}
+
 	return (
 		<form
 			onSubmit={(e) => {
@@ -238,97 +336,20 @@ export function ProductFormContent({
 			data-shipping-loaded={isShippingFetched || !!editingProductId}
 		>
 			<div className="flex-1 flex flex-col min-h-0 overflow-hidden max-h-[calc(100vh-200px)]">
-				{/* Single level tabs: Name, Detail, Spec, Category, Images, Shipping */}
-				<Tabs
-					value={activeTab}
-					onValueChange={(value) => productFormActions.setActiveTab(value as ProductFormTab)}
-					className="w-full flex flex-col flex-1 min-h-0 overflow-hidden"
-				>
-					<TabsList className="w-full bg-transparent h-auto p-0 flex flex-wrap gap-[1px]">
-						<TabsTrigger
-							value="name"
-							className="flex-1 px-4 py-2 text-xs font-medium data-[state=active]:bg-secondary data-[state=active]:text-white data-[state=inactive]:bg-gray-100 data-[state=inactive]:text-black rounded-none"
-							data-testid="product-tab-name"
-						>
-							Name
-							{draftValidation.issuesByTab.name?.length ? <span className="ml-1 text-red-500">*</span> : null}
-						</TabsTrigger>
-						<TabsTrigger
-							value="detail"
-							className="flex-1 px-4 py-2 text-xs font-medium data-[state=active]:bg-secondary data-[state=active]:text-white data-[state=inactive]:bg-gray-100 data-[state=inactive]:text-black rounded-none"
-							data-testid="product-tab-detail"
-						>
-							Detail
-						</TabsTrigger>
-						<TabsTrigger
-							value="spec"
-							className="flex-1 px-4 py-2 text-xs font-medium data-[state=active]:bg-secondary data-[state=active]:text-white data-[state=inactive]:bg-gray-100 data-[state=inactive]:text-black rounded-none"
-							data-testid="product-tab-spec"
-						>
-							Spec
-						</TabsTrigger>
-						<TabsTrigger
-							value="category"
-							className="flex-1 px-4 py-2 text-xs font-medium data-[state=active]:bg-secondary data-[state=active]:text-white data-[state=inactive]:bg-gray-100 data-[state=inactive]:text-black rounded-none"
-							data-testid="product-tab-category"
-						>
-							Category
-						</TabsTrigger>
-						<TabsTrigger
-							value="images"
-							className="flex-1 px-4 py-2 text-xs font-medium data-[state=active]:bg-secondary data-[state=active]:text-white data-[state=inactive]:bg-gray-100 data-[state=inactive]:text-black rounded-none"
-							data-testid="product-tab-images"
-						>
-							Images
-							{draftValidation.issuesByTab.images?.length ? <span className="ml-1 text-red-500">*</span> : null}
-						</TabsTrigger>
-						<TabsTrigger
-							value="shipping"
-							className="flex-1 px-4 py-2 text-xs font-medium data-[state=active]:bg-secondary data-[state=active]:text-white data-[state=inactive]:bg-gray-100 data-[state=inactive]:text-black rounded-none"
-							data-testid="product-tab-shipping"
-						>
-							Shipping
-							{draftValidation.issuesByTab.shipping?.length ? <span className="ml-1 text-red-500">*</span> : null}
-						</TabsTrigger>
-					</TabsList>
+				<ProductAuthoringStageNavigator resolution={resolvedStageResolution} onStageSelect={selectStage} />
 
-					<div className="flex-1 overflow-y-auto min-h-0">
-						<TabsContent value="name" className="mt-4">
-							<NameTab />
-						</TabsContent>
-
-						<TabsContent value="detail" className="mt-4">
-							<DetailTab />
-						</TabsContent>
-
-						<TabsContent value="spec" className="mt-4">
-							<SpecTab />
-						</TabsContent>
-
-						<TabsContent value="category" className="mt-4">
-							<CategoryTab />
-						</TabsContent>
-
-						<TabsContent value="images" className="mt-4">
-							<ImagesTab />
-						</TabsContent>
-
-						<TabsContent value="shipping" className="mt-4">
-							<ShippingTab />
-						</TabsContent>
-					</div>
-				</Tabs>
+				<div className="flex-1 overflow-y-auto min-h-0">{selectedStageContent}</div>
 			</div>
 
 			{showFooter && (
 				<div className="bg-white border-t pt-4 pb-4 mt-4">
 					<div className="flex gap-2 w-full">
-						{activeTab !== 'name' && (
+						{previousStage && (
 							<Button
 								type="button"
 								variant="outline"
 								className="flex-1 gap-2 uppercase"
-								onClick={productFormActions.previousTab}
+								onClick={handleBack}
 								data-testid="product-back-button"
 							>
 								<span className="i-back w-6 h-6"></span>
@@ -336,23 +357,16 @@ export function ProductFormContent({
 							</Button>
 						)}
 
-						{/* Show 'Next' button when shipping tab is the resolved first step and user is still onboarding shipping */}
-						{resolvedWorkflow.shouldStartAtShipping && activeTab === 'shipping' && !draftValidation.hasValidShipping ? (
-							<Button
-								type="button"
-								variant="secondary"
-								className="flex-1 uppercase"
-								onClick={() => productFormActions.setActiveTab('name')}
-								data-testid="product-next-button"
-							>
-								Next
-							</Button>
-						) : activeTab === 'shipping' || editingProductId ? (
+						{selectedStage === 'publish' ? (
 							<form.Subscribe
 								selector={(state) => [state.canSubmit, state.isSubmitting]}
-								children={([canSubmit, isSubmitting]) => {
-									// Check if we need V4V setup for new products
-									if (resolvedWorkflow.requiresV4VSetup && !editingProductId) {
+								children={([, isSubmitting]) => {
+									const validationIssues = resolvedStageResolution.publishIssues
+									const hasValidationErrors = !resolvedStageResolution.canPublish
+									const hasV4VSetupBlocker = validationIssues.includes(PRODUCT_AUTHORING_V4V_SETUP_ISSUE)
+									const hasNonV4VBlockers = validationIssues.some((issue) => issue !== PRODUCT_AUTHORING_V4V_SETUP_ISSUE)
+
+									if (hasV4VSetupBlocker && !hasNonV4VBlockers && !editingProductId) {
 										return (
 											<TooltipProvider>
 												<Tooltip>
@@ -381,8 +395,6 @@ export function ProductFormContent({
 										)
 									}
 
-									const validationIssues = draftValidation.issues
-									const hasValidationErrors = !draftValidation.allRequiredFieldsValid
 									const isDisabled = isSubmitting || isPublishing || hasValidationErrors
 
 									return (
@@ -426,7 +438,8 @@ export function ProductFormContent({
 								type="button"
 								variant="secondary"
 								className="flex-1 uppercase"
-								onClick={productFormActions.nextTab}
+								onClick={handleNext}
+								disabled={!nextStage}
 								data-testid="product-next-button"
 							>
 								Next
