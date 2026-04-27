@@ -16,8 +16,8 @@ type ProductCreateShellProps = {
 
 let lastCreateShellBootstrapIdentity: string | null = null
 
-function hasStartedProductFormOrIsEditing(state: ProductFormState) {
-	if (state.editingProductId) return true
+function hasStartedCreateDraft(state: ProductFormState) {
+	if (state.editingProductId) return false
 	if (state.isDirty) return true
 
 	return (
@@ -61,7 +61,7 @@ export function ProductCreateShell({ userPubkey, className = '', formClassName, 
 	const readiness = useProductCreateReadiness(normalizedUserPubkey)
 	const [isBootstrapped, setIsBootstrapped] = useState(false)
 	const hasBootstrappedRef = useRef(false)
-	const hasStartedCreateFormOrIsEditing = hasStartedProductFormOrIsEditing(formState)
+	const hasStartedCreateDraftState = hasStartedCreateDraft(formState)
 
 	const workflow = useMemo(
 		() =>
@@ -83,10 +83,9 @@ export function ProductCreateShell({ userPubkey, className = '', formClassName, 
 
 		const hasKnownDifferentBootstrapIdentity =
 			lastCreateShellBootstrapIdentity !== null && lastCreateShellBootstrapIdentity !== normalizedUserPubkey
-		const shouldResumeExistingSession =
-			Boolean(formState.editingProductId) || (hasStartedCreateFormOrIsEditing && !hasKnownDifferentBootstrapIdentity)
+		const shouldResumeCreateDraft = hasStartedCreateDraftState && !hasKnownDifferentBootstrapIdentity
 
-		if (!shouldResumeExistingSession) {
+		if (!shouldResumeCreateDraft) {
 			productFormActions.startCreateProductSession()
 			productFormActions.setActiveTab(workflow.initialTab)
 		}
@@ -94,7 +93,7 @@ export function ProductCreateShell({ userPubkey, className = '', formClassName, 
 		lastCreateShellBootstrapIdentity = normalizedUserPubkey
 		hasBootstrappedRef.current = true
 		setIsBootstrapped(true)
-	}, [formState.editingProductId, hasStartedCreateFormOrIsEditing, normalizedUserPubkey, workflow.initialTab, workflow.isBootstrapReady])
+	}, [hasStartedCreateDraftState, normalizedUserPubkey, workflow.initialTab, workflow.isBootstrapReady])
 
 	const content =
 		!workflow.isBootstrapReady || !isBootstrapped ? (
