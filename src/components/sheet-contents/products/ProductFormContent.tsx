@@ -7,6 +7,7 @@ import { ndkActions } from '@/lib/stores/ndk'
 import { productFormActions, productFormStore, type ProductFormTab } from '@/lib/stores/product'
 import { uiActions } from '@/lib/stores/ui'
 import { hasProductFormDraft } from '@/lib/utils/productFormStorage'
+import { validateProductDraft } from '@/lib/workflow/productDraftValidation'
 import { createShippingReference, getShippingInfo, useShippingOptionsByPubkey, isShippingDeleted } from '@/queries/shipping'
 import { useForm } from '@tanstack/react-form'
 import { useQueryClient } from '@tanstack/react-query'
@@ -37,7 +38,7 @@ export function ProductFormContent({
 
 	// Get form state from store, including editingProductId
 	const formState = useStore(productFormStore)
-	const { activeTab, editingProductId, isDirty, shippings, name, description, images } = formState
+	const { activeTab, editingProductId, isDirty, shippings } = formState
 	const resolvedWorkflow: ProductWorkflowResolution = workflow ?? {
 		mode: editingProductId ? 'edit' : 'create',
 		isBootstrapReady: true,
@@ -53,21 +54,6 @@ export function ProductFormContent({
 			)
 		}
 	}, [workflow, editingProductId, resolvedWorkflow.mode])
-
-	// Compute validation states
-	const hasValidName = name.trim().length > 0
-	const hasValidDescription = description.trim().length > 0
-	const hasValidImages = images.length > 0
-
-	// Compute validation message for tooltip
-	const getValidationMessage = () => {
-		const issues: string[] = []
-		if (!hasValidName) issues.push('Product name is required')
-		if (!hasValidDescription) issues.push('Description is required')
-		if (!hasValidImages) issues.push('At least one image is required')
-		if (!hasValidShipping) issues.push('At least one shipping option is required')
-		return issues
-	}
 
 	// Get user pubkey from auth store directly to avoid timing issues
 	const authState = useStore(authStore)
@@ -94,13 +80,19 @@ export function ProductFormContent({
 		)
 	}, [userShippingOptions])
 
+	const draftValidation = useMemo(
+		() =>
+			validateProductDraft({
+				state: formState,
+				resolvedShippingRefs,
+				isShippingFetched,
+			}),
+		[formState, isShippingFetched, resolvedShippingRefs],
+	)
+
 	const hasSelectedShipping = useMemo(() => {
 		return shippings.some((ship) => !!ship.shippingRef)
 	}, [shippings])
-
-	const hasValidShipping = useMemo(() => {
-		return shippings.some((ship) => ship.shippingRef && (!isShippingFetched || resolvedShippingRefs.has(ship.shippingRef)))
-	}, [shippings, isShippingFetched, resolvedShippingRefs])
 
 	// Once the draft has a shipping reference, move out of the shipping-first bootstrap step
 	// without waiting for query cache propagation to catch up.
@@ -259,7 +251,7 @@ export function ProductFormContent({
 							data-testid="product-tab-name"
 						>
 							Name
-							{(!hasValidName || !hasValidDescription) && <span className="ml-1 text-red-500">*</span>}
+							{draftValidation.issuesByTab.name?.length ? <span className="ml-1 text-red-500">*</span> : null}
 						</TabsTrigger>
 						<TabsTrigger
 							value="detail"
@@ -288,7 +280,7 @@ export function ProductFormContent({
 							data-testid="product-tab-images"
 						>
 							Images
-							{!hasValidImages && <span className="ml-1 text-red-500">*</span>}
+							{draftValidation.issuesByTab.images?.length ? <span className="ml-1 text-red-500">*</span> : null}
 						</TabsTrigger>
 						<TabsTrigger
 							value="shipping"
@@ -296,7 +288,7 @@ export function ProductFormContent({
 							data-testid="product-tab-shipping"
 						>
 							Shipping
-							{!hasValidShipping && <span className="ml-1 text-red-500">*</span>}
+							{draftValidation.issuesByTab.shipping?.length ? <span className="ml-1 text-red-500">*</span> : null}
 						</TabsTrigger>
 					</TabsList>
 
@@ -345,7 +337,7 @@ export function ProductFormContent({
 						)}
 
 						{/* Show 'Next' button when shipping tab is the resolved first step and user is still onboarding shipping */}
-						{resolvedWorkflow.shouldStartAtShipping && activeTab === 'shipping' && !hasValidShipping ? (
+						{resolvedWorkflow.shouldStartAtShipping && activeTab === 'shipping' && !draftValidation.hasValidShipping ? (
 							<Button
 								type="button"
 								variant="secondary"
@@ -389,8 +381,8 @@ export function ProductFormContent({
 										)
 									}
 
-									const validationIssues = getValidationMessage()
-									const hasValidationErrors = validationIssues.length > 0
+									const validationIssues = draftValidation.issues
+									const hasValidationErrors = !draftValidation.allRequiredFieldsValid
 									const isDisabled = isSubmitting || isPublishing || hasValidationErrors
 
 									return (
