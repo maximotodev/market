@@ -9,6 +9,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 
 type ProductCreateShellProps = {
 	userPubkey?: string | null
+	entrypoint: 'dashboard' | 'homepage-sheet'
 	className?: string
 	formClassName?: string
 	showFooter?: boolean
@@ -55,7 +56,7 @@ function ProductCreateLoadingState() {
 	)
 }
 
-export function ProductCreateShell({ userPubkey, className = '', formClassName, showFooter = true }: ProductCreateShellProps) {
+export function ProductCreateShell({ userPubkey, entrypoint, className = '', formClassName, showFooter = true }: ProductCreateShellProps) {
 	const normalizedUserPubkey = userPubkey ?? ''
 	const formState = useStore(productFormStore)
 	const readiness = useProductCreateReadiness(normalizedUserPubkey)
@@ -83,7 +84,7 @@ export function ProductCreateShell({ userPubkey, className = '', formClassName, 
 
 		const hasKnownDifferentBootstrapIdentity =
 			lastCreateShellBootstrapIdentity !== null && lastCreateShellBootstrapIdentity !== normalizedUserPubkey
-		const shouldResumeCreateDraft = hasStartedCreateDraftState && !hasKnownDifferentBootstrapIdentity
+		const shouldResumeCreateDraft = entrypoint === 'homepage-sheet' && hasStartedCreateDraftState && !hasKnownDifferentBootstrapIdentity
 
 		if (!shouldResumeCreateDraft) {
 			productFormActions.startCreateProductSession()
@@ -93,7 +94,7 @@ export function ProductCreateShell({ userPubkey, className = '', formClassName, 
 		lastCreateShellBootstrapIdentity = normalizedUserPubkey
 		hasBootstrappedRef.current = true
 		setIsBootstrapped(true)
-	}, [hasStartedCreateDraftState, normalizedUserPubkey, workflow.initialTab, workflow.isBootstrapReady])
+	}, [entrypoint, hasStartedCreateDraftState, normalizedUserPubkey, workflow.initialTab, workflow.isBootstrapReady])
 
 	const content =
 		!workflow.isBootstrapReady || !isBootstrapped ? (

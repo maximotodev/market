@@ -14,5 +14,5 @@ function NewProductComponent() {
 	const { user } = useStore(authStore)
 	const userPubkey = user?.pubkey ?? ''
 
-	return <ProductCreateShell userPubkey={userPubkey} className="space-y-6" />
+	return <ProductCreateShell userPubkey={userPubkey} entrypoint="dashboard" className="space-y-6" />
 }

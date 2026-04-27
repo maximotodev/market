@@ -99,7 +99,7 @@ export function NewProductContent({
 				<SheetDescription className="hidden">{description || defaultDescription}</SheetDescription>
 			</SheetHeader>
 
-			{editingProductId ? <ProductFormContent /> : <ProductCreateShell userPubkey={userPubkey} />}
+			{editingProductId ? <ProductFormContent /> : <ProductCreateShell userPubkey={userPubkey} entrypoint="homepage-sheet" />}
 		</SheetContent>
 	)
 }
