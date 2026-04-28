@@ -68,9 +68,8 @@ export function ProductFormContent({
 	// Get form state from store, including editingProductId
 	const formState = useStore(productFormStore)
 	const { activeTab, editingProductId, isDirty } = formState
-	const [editCompatibilityStage, setEditCompatibilityStage] = useState<ProductAuthoringStage>(() =>
-		getProductAuthoringStageForTab(activeTab),
-	)
+	const nextCompatibilityStage = getProductAuthoringStageForTab(activeTab)
+	const [editCompatibilityStage, setEditCompatibilityStage] = useState<ProductAuthoringStage>(() => nextCompatibilityStage)
 	const resolvedWorkflow: ProductWorkflowResolution = workflow ?? {
 		mode: editingProductId ? 'edit' : 'create',
 		isBootstrapReady: true,
@@ -86,6 +85,13 @@ export function ProductFormContent({
 			)
 		}
 	}, [workflow, editingProductId, resolvedWorkflow.mode])
+
+	useEffect(() => {
+		if (stageResolution || resolvedWorkflow.mode !== 'edit') return
+		if (nextCompatibilityStage === editCompatibilityStage) return
+
+		setEditCompatibilityStage(nextCompatibilityStage)
+	}, [editCompatibilityStage, nextCompatibilityStage, resolvedWorkflow.mode, stageResolution])
 
 	// Get user pubkey from auth store directly to avoid timing issues
 	const authState = useStore(authStore)
