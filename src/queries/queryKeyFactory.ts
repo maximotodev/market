@@ -132,6 +132,62 @@ export const messageKeys = {
 		[...messageKeys.all, 'conversation', currentUserPubkey || 'na', otherUserPubkey || 'na'] as const,
 } as const
 
+export type OrderChatParticipantKeyState = { state: 'canonical'; value: string } | { state: 'malformed' } | { state: 'unreadable' }
+
+export type OrderChatOrderIdKeyState =
+	| { state: 'valid'; value: string }
+	| { state: 'invalid_type' }
+	| { state: 'invalid_value' }
+	| { state: 'unreadable' }
+
+export type OrderChatOrderContextKeyState =
+	| { state: 'absent' }
+	| { state: 'invalid_container' }
+	| { state: 'unreadable' }
+	| {
+			state: 'supplied'
+			orderId: OrderChatOrderIdKeyState
+			buyerPubkey: OrderChatParticipantKeyState
+			sellerPubkey: OrderChatParticipantKeyState
+	  }
+
+export type OrderChatRelayArrayKeyState =
+	| { state: 'absent' }
+	| { state: 'empty' }
+	| { state: 'values'; value: string[] }
+	| { state: 'malformed' }
+	| { state: 'unreadable' }
+
+export type OrderChatNumericKeyState =
+	| { state: 'absent' }
+	| { state: 'valid'; value: number }
+	| { state: 'invalid' }
+	| { state: 'unreadable' }
+
+/**
+ * Intentionally presence-only: replacing one present signer with another does
+ * not change the key. Live integration must invalidate order-chat reads when
+ * it knows that a same-presence signer or session replacement occurred.
+ */
+export type OrderChatSignerKeyState = { state: 'absent' } | { state: 'present' } | { state: 'unreadable' }
+
+export type OrderChatReadKeySnapshot = {
+	activeUserPubkey: OrderChatParticipantKeyState
+	counterpartyPubkey: OrderChatParticipantKeyState
+	orderContext: OrderChatOrderContextKeyState
+	legacyRelayUrls: OrderChatRelayArrayKeyState
+	discoveryRelayUrls: OrderChatRelayArrayKeyState
+	legacyLimitPerDirection: OrderChatNumericKeyState
+	giftWrapLimit: OrderChatNumericKeyState
+	timeoutMs: OrderChatNumericKeyState
+	signer: OrderChatSignerKeyState
+}
+
+export const orderChatKeys = {
+	all: ['orderChat'] as const,
+	read: (snapshot: OrderChatReadKeySnapshot) => [...orderChatKeys.all, 'read', snapshot] as const,
+} as const
+
 export const migrationKeys = {
 	all: ['migration'] as const,
 	nip15Products: (userPubkey: string) => [...migrationKeys.all, 'nip15Products', userPubkey] as const,
