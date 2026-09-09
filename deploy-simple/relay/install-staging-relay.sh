@@ -23,7 +23,14 @@ readonly LISTEN_ADDR="127.0.0.1:10549"
 readonly MIN_FREE=$((2 * 1024 * 1024 * 1024))
 # The readiness deadline is configurable. Sixty seconds is the initial
 # candidate until measured staging startup behavior establishes a better value.
+# A sanity upper bound prevents a typo from blocking the activation gate until
+# the Actions job timeout.
 readonly READINESS_SECONDS="${RELAY_READINESS_SECONDS:-60}"
+readonly READINESS_MAX_SECONDS=600
+# 75 mirrors sysexits.h EX_TEMPFAIL: the process is up and identity/storage
+# are valid, but local NIP-11 readiness was not confirmed before the deadline.
+# It is deliberately distinct from 70 (EX_SOFTWARE), which signals a structural
+# failure where the service may be down and manual intervention is required.
 readonly READINESS_TIMEOUT_STATUS=75
 readonly OBSERVE_SECONDS=60
 readonly SAMPLE_SECONDS=5
@@ -53,6 +60,10 @@ uint() {
 validate_config() {
 	uint "$READINESS_SECONDS" && ((10#$READINESS_SECONDS > 0)) || {
 		echo "Relay readiness deadline must be a positive integer"
+		return 1
+	}
+	((10#$READINESS_SECONDS <= READINESS_MAX_SECONDS)) || {
+		echo "Relay readiness deadline must not exceed ${READINESS_MAX_SECONDS} seconds"
 		return 1
 	}
 }
@@ -295,6 +306,21 @@ rollback() {
 	local pid invocation restarts active substate readiness_status rollback_epoch
 	local raw_before search_before free_before
 
+	# Capture storage metrics before stopping the service so the du/df I/O does
+	# not extend the outage window. These form the baseline for the rollback
+	# readiness check after the previous binary is restored and restarted.
+	raw_before="$(allocated "$RAW_DIR")"
+	search_before="$(allocated "$SEARCH_DIR")"
+	free_before="$(free_bytes)"
+	uint "$raw_before" && uint "$search_before" && uint "$free_before" || {
+		echo "Unable to read numeric rollback-readiness storage metrics"
+		return 1
+	}
+	((free_before >= MIN_FREE)) || {
+		echo "Staging relay data filesystem is below the rollback free-space gate"
+		return 1
+	}
+
 	sudo systemctl stop "$SERVICE_NAME" || {
 		echo "Unable to stop failed staging relay"
 		return 1
@@ -327,18 +353,6 @@ rollback() {
 	}
 	[[ -z "$(property DropInPaths)" ]] || {
 		echo "Rollback unit has unexpected systemd drop-ins"
-		return 1
-	}
-
-	raw_before="$(allocated "$RAW_DIR")"
-	search_before="$(allocated "$SEARCH_DIR")"
-	free_before="$(free_bytes)"
-	uint "$raw_before" && uint "$search_before" && uint "$free_before" || {
-		echo "Unable to read numeric rollback-readiness storage metrics"
-		return 1
-	}
-	((free_before >= MIN_FREE)) || {
-		echo "Staging relay data filesystem is below the rollback free-space gate"
 		return 1
 	}
 
@@ -452,14 +466,14 @@ on_exit() {
 }
 
 check_growth() {
-	local raw_before="$1" search_before="$2" free_before="$3"
+	local context="$1" raw_before="$2" search_before="$3" free_before="$4"
 	local raw_now search_now free_now raw_growth search_growth free_loss
 
 	raw_now="$(allocated "$RAW_DIR")"
 	search_now="$(allocated "$SEARCH_DIR")"
 	free_now="$(free_bytes)"
 	uint "$raw_now" && uint "$search_now" && uint "$free_now" || {
-		echo "Unable to read numeric relay storage metrics"
+		echo "${context}: unable to read numeric relay storage metrics"
 		return 1
 	}
 
@@ -468,19 +482,19 @@ check_growth() {
 	free_loss="$(positive_delta "$free_before" "$free_now")"
 
 	((raw_growth <= MAX_RAW_GROWTH)) || {
-		echo "Staging raw allocation exceeded the emergency growth gate"
+		echo "${context}: raw allocation exceeded the emergency growth gate"
 		return 1
 	}
 	((search_growth <= MAX_SEARCH_GROWTH)) || {
-		echo "Staging search allocation exceeded the emergency growth gate"
+		echo "${context}: search allocation exceeded the emergency growth gate"
 		return 1
 	}
 	((free_loss <= MAX_FREE_LOSS)) || {
-		echo "Staging filesystem free-space loss exceeded the emergency growth gate"
+		echo "${context}: filesystem free-space loss exceeded the emergency growth gate"
 		return 1
 	}
 	((free_now >= MIN_FREE)) || {
-		echo "Staging relay data filesystem fell below the minimum free-space gate"
+		echo "${context}: relay data filesystem fell below the minimum free-space gate"
 		return 1
 	}
 
@@ -500,7 +514,7 @@ check_runtime_sample() {
 	[[ "$(property InvocationID)" == "$invocation" ]] || { echo "${context}: InvocationID changed"; return 1; }
 	[[ "$(property NRestarts)" == "0" ]] || { echo "${context}: NRestarts is nonzero"; return 1; }
 	[[ "$(hash_file "/proc/${pid}/exe")" == "$binary_sha" ]] || { echo "${context}: running binary hash does not match expected"; return 1; }
-	check_growth "$raw_before" "$search_before" "$free_before"
+	check_growth "$context" "$raw_before" "$search_before" "$free_before"
 }
 
 wait_for_readiness() {
@@ -580,13 +594,13 @@ check_journal_window() {
 	local context="$1" epoch="$2"
 	local service_journal kernel_journal grep_status
 
-	if service_journal="$(sudo journalctl -u "$SERVICE_NAME" -n 1000 --since "@${epoch}" --no-pager 2>&1)"; then
+	if service_journal="$(sudo journalctl -u "$SERVICE_NAME" --since "@${epoch}" --no-pager 2>&1)"; then
 		:
 	else
 		echo "${context}: unable to read relay service journal"
 		return 1
 	fi
-	if kernel_journal="$(sudo journalctl -k -n 1000 --since "@${epoch}" --no-pager 2>&1)"; then
+	if kernel_journal="$(sudo journalctl -k --since "@${epoch}" --no-pager 2>&1)"; then
 		:
 	else
 		echo "${context}: unable to read kernel journal"
@@ -623,14 +637,29 @@ check_journal_window() {
 observe() {
 	local epoch="$1" pid="$2" invocation="$3" binary_sha="$4"
 	local raw_before="$5" search_before="$6" free_before="$7"
-	local deadline
+	local start deadline now
 	local health_failures=0
 
-	deadline=$((SECONDS + OBSERVE_SECONDS))
-	while ((SECONDS < deadline)); do
-		sleep "$SAMPLE_SECONDS"
+	start="$(readiness_now)"
+	uint "$start" || {
+		echo "Steady-state observation could not read a monotonic start time"
+		return 1
+	}
+	deadline=$((start + OBSERVE_SECONDS))
+	while :; do
+		now="$(readiness_now)"
+		uint "$now" || {
+			echo "Steady-state observation could not read a monotonic sample time"
+			return 1
+		}
+		((now < deadline)) || break
+
+		readiness_sleep "$SAMPLE_SECONDS" || {
+			echo "Steady-state observation retry sleep failed"
+			return 1
+		}
 		check_runtime_sample "Steady-state observation sample" "$pid" "$invocation" "$binary_sha" \
-			"$raw_before" "$search_before" "$free_before"
+			"$raw_before" "$search_before" "$free_before" || return 1
 
 		if local_health; then
 			health_failures=0
@@ -648,9 +677,12 @@ observe() {
 	# process/storage/health sample after a full interval so the deployment
 	# cannot pass if runtime identity or growth drifts during the health retry.
 	if ((health_failures == 1)); then
-		sleep "$SAMPLE_SECONDS"
+		readiness_sleep "$SAMPLE_SECONDS" || {
+			echo "Steady-state observation retry sleep failed"
+			return 1
+		}
 		check_runtime_sample "Steady-state observation sample" "$pid" "$invocation" "$binary_sha" \
-			"$raw_before" "$search_before" "$free_before"
+			"$raw_before" "$search_before" "$free_before" || return 1
 		if local_health; then
 			health_failures=0
 		else
@@ -661,11 +693,11 @@ observe() {
 		fi
 	fi
 
-	check_journal_window "Activation observation" "$epoch"
+	check_journal_window "Activation observation" "$epoch" || return 1
 
 	# Reconfirm the terminal runtime/storage state after journal collection.
 	check_runtime_sample "Steady-state terminal sample" "$pid" "$invocation" "$binary_sha" \
-		"$raw_before" "$search_before" "$free_before"
+		"$raw_before" "$search_before" "$free_before" || return 1
 
 	printf 'post_main_pid=%s\n' "$pid"
 	printf 'post_invocation_id=%s\n' "$invocation"

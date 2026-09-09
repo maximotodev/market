@@ -51,7 +51,14 @@ jobs:
           cd deploy-simple/relay
           go test ./...
 
+      - name: Shellcheck relay scripts
+        run: |
+          shellcheck -S error deploy-simple/relay/install-staging-relay.sh
+          shellcheck -S error deploy-simple/relay/tests/install-staging-relay-readiness.test.sh
+
       - name: Test staging relay readiness gate
+        env:
+          RELAY_READINESS_SECONDS: '10'
         run: bash deploy-simple/relay/tests/install-staging-relay-readiness.test.sh
 
       - name: Build relay binary
@@ -134,6 +141,8 @@ jobs:
           strip_components: 1
 
       - name: Install relay on staging
+        id: install
+        continue-on-error: true
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.STAGING_HOST }}
@@ -145,13 +154,41 @@ jobs:
             chmod +x "$deploy_dir/install-staging-relay.sh"
             "$deploy_dir/install-staging-relay.sh" "$deploy_dir"
 
+      # The installer returns 75 (EX_TEMPFAIL) when the process is up and
+      # identity/storage are valid but local NIP-11 readiness was not confirmed
+      # before the deadline (operator review), and 70 (EX_SOFTWARE) on a
+      # structural failure where the service may be down (manual intervention).
+      # The appleboy/ssh-action step does not expose the remote exit code as a
+      # step output, so the 75-vs-70 distinction must be read from the step
+      # logs. This step surfaces that guidance and fails the job so a failed
+      # install is never silently green.
+      - name: Classify staging install result
+        if: ${{ always() && steps.install.outcome == 'failure' }}
+        run: |
+          echo "Staging relay install step failed; see the 'Install relay on staging' logs for the exit code."
+          echo "Exit 75 = readiness timeout (process up, operator review)."
+          echo "Exit 70 = structural failure (service may be down, manual intervention)."
+          exit 1
+
       - name: Verify staging relay
+        if: ${{ steps.install.outcome == 'success' }}
         env:
           RELAY_VERSION: ${{ needs.build-relay.outputs.relay_version }}
         run: |
-          sleep 5
-          curl --connect-timeout 5 --max-time 10 -sf \
-            -H 'Accept: application/nostr+json' https://relay.staging.plebeian.market/ | jq .
+          # The local readiness gate is authoritative for the process; the
+          # public endpoint additionally depends on Caddy/TLS routing, which
+          # can lag the local gate. Bound the public check with a retry loop
+          # instead of a fixed sleep so a slow router does not flake the step.
+          deadline=$((SECONDS + 60))
+          until curl --connect-timeout 5 --max-time 10 -sf \
+            -H 'Accept: application/nostr+json' https://relay.staging.plebeian.market/ | jq .; do
+            if ((SECONDS >= deadline)); then
+              echo "Staging relay public endpoint did not become reachable within 60s" >&2
+              exit 1
+            fi
+            echo "Staging relay public endpoint not ready yet; retrying..."
+            sleep 5
+          done
           echo "✅ Staging relay deployment verified (${RELAY_VERSION})"
 
   deploy-production:

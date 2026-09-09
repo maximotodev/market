@@ -214,9 +214,67 @@ setup_oom_journal() { KERNEL_JOURNAL="Out of memory: Killed process 123"; }
 setup_service_journal_failure() { SERVICE_JOURNAL_FAIL=1; }
 setup_kernel_journal_failure() { KERNEL_JOURNAL_FAIL=1; }
 
+observe_case() {
+	local setup="$1" expected_status="$2" expected_output="$3"
+	reset_state
+	"$setup"
+	capture observe 123 "$PID_VALUE" "$INVOCATION_VALUE" "$EXPECTED_SHA" \
+		"$RAW_BASE" "$SEARCH_BASE" "$FREE_BASE"
+	assert_result "$expected_status" "$expected_output"
+}
+
+setup_observe_success() { HEALTH_SUCCEEDS_AT=1; }
+setup_observe_two_failures() { HEALTH_SUCCEEDS_AT=999999; }
+setup_observe_single_failure_recovery() { HEALTH_SUCCEEDS_AT=2; }
+setup_observe_restart_evidence() { setup_observe_success; SERVICE_JOURNAL="automatic restarting"; }
+
+growth_case() {
+	local setup="$1" expected_status="$2" expected_output="$3"
+	reset_state
+	"$setup"
+	capture check_growth "Growth context" "$RAW_BASE" "$SEARCH_BASE" "$FREE_BASE"
+	assert_result "$expected_status" "$expected_output"
+}
+
+setup_growth_context_failure() { RAW_GROWTH_AT=0; RAW_GROWTH=$((MAX_RAW_GROWTH + 1)); }
+
+test_validate_payload() {
+	local dir
+	dir="$(mktemp -d)"
+
+	# Missing binary artifact is rejected.
+	capture bash -c 'source "$2"; validate_payload' _ "$dir" "$INSTALLER"
+	assert_result 1 "Missing or unsafe deploy artifact" || { rm -rf "$dir"; return 1; }
+
+	# Symlinked binary artifact is rejected.
+	printf 'bin' > "$dir/market-relay"
+	printf 'unit' > "$dir/market-relay.service"
+	ln -s "$dir/market-relay" "$dir/market-relay-link"
+	mv "$dir/market-relay" "$dir/market-relay-real"
+	ln -s "$dir/market-relay-real" "$dir/market-relay"
+	capture bash -c 'source "$2"; validate_payload' _ "$dir" "$INSTALLER"
+	assert_result 1 "Missing or unsafe deploy artifact" || { rm -rf "$dir"; return 1; }
+
+	# Mismatched systemd unit contract is rejected.
+	rm -f "$dir/market-relay" "$dir/market-relay-real" "$dir/market-relay-link"
+	printf 'bin' > "$dir/market-relay"
+	printf 'User=deployer\n' > "$dir/market-relay.service"
+	capture bash -c 'source "$2"; validate_payload' _ "$dir" "$INSTALLER"
+	assert_result 1 "does not match the staging deployment contract" || { rm -rf "$dir"; return 1; }
+
+	# Valid payload passes.
+	printf 'User=deployer\nGroup=deployer\nEnvironmentFile=/etc/market-relay.env\nExecStart=/usr/local/bin/market-relay\n' > "$dir/market-relay.service"
+	capture bash -c 'source "$2"; validate_payload' _ "$dir" "$INSTALLER"
+	assert_result 0 "" || { rm -rf "$dir"; return 1; }
+
+	rm -rf "$dir"
+}
+
 test_readiness_configuration_validation() {
 	capture env RELAY_READINESS_SECONDS=invalid bash "$INSTALLER" /nonexistent
-	assert_result 1 "readiness deadline must be a positive integer"
+	assert_result 1 "readiness deadline must be a positive integer" || return 1
+	capture env RELAY_READINESS_SECONDS=60000 bash "$INSTALLER" /nonexistent
+	assert_result 1 "readiness deadline must not exceed" || return 1
 }
 
 test_readiness_wiring() {
@@ -334,5 +392,11 @@ run_test "successful rollback cleanup classification" on_exit_case 1 0 1 0 ""
 run_test "successful rollback preserves arbitrary original status" on_exit_case 42 0 42 0 ""
 run_test "rollback timeout retention classification" on_exit_case 1 "$READINESS_TIMEOUT_STATUS" "$READINESS_TIMEOUT_STATUS" 1 "health was not confirmed"
 run_test "structural rollback retention classification" on_exit_case 1 1 70 1 "structurally failed"
+run_test "observe steady-state success" observe_case setup_observe_success 0 "post_main_pid"
+run_test "observe two consecutive health failures" observe_case setup_observe_two_failures 1 "failed on two consecutive samples"
+run_test "observe single failure then recovery" observe_case setup_observe_single_failure_recovery 0 "post_main_pid"
+run_test "observe restart evidence is structural" observe_case setup_observe_restart_evidence 1 "automatic relay restart evidence found"
+run_test "check_growth error carries context prefix" growth_case setup_growth_context_failure 1 "Growth context: raw allocation exceeded the emergency growth gate"
+run_test "validate_payload artifact and unit contract" test_validate_payload
 
 printf '1..%s\n' "$TESTS_RUN"
