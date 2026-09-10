@@ -1,311 +1,496 @@
-import { fail } from '../errors'
-import { assertAuthorityInvariant, assertObservedVersion, authorizeMonetaryCapability, transitionAuthority } from './authority'
+import { captureObject, fail } from '../errors'
 import {
-	MIGRATION_QUARANTINE_REASONS,
+	buildCocoWalletNamespace,
+	normalizeNostrPubkey,
+	parseCocoEnvironment,
+	parseCocoWalletNamespace,
+	type CocoG9aEnvironment,
+} from '../namespace'
+import type { AuthorityStatus, MonetaryPermissionProjection } from './authority'
+import {
+	canonicalizeMintUrl,
 	createMonetaryBucketIdentity,
+	decodeMonetaryBucketKey,
 	monetaryBucketKey,
-	normalizeMintUrl,
 	normalizeUnit,
+	parseMigrationItemState,
+	parseMigrationPhase,
+	parseQuarantineReason,
 	requireSafeId,
-	type AuthorityVersion,
-	type MigrationItemRecord,
-	type MigrationQuarantineReason,
+	type CanonicalMintUrl,
 	type MigrationItemState,
 	type MigrationPhase,
-	type MonetaryCapability,
-	type WalletAuthoritySnapshot,
+	type MigrationQuarantineReason,
+	type MonetaryBucketIdentity,
+	type MonetaryBucketKey,
+	type MonetaryOwner,
+	type Nip60Policy,
 } from './types'
-import { normalizeNostrPubkey } from '../namespace'
 
+export const I1B_HOST_DISPATCH_FENCE_REQUIRED = true
+export const LEGACY_RETIREMENT_DEFERRED_PENDING_AUTHORITATIVE_INVENTORY = true
+
+type AuthorityRecord = AuthorityStatus
+
+export interface MigrationItemRecord {
+	id: string
+	walletKey: string
+	user: string
+	environment: CocoG9aEnvironment
+	migrationEpoch: string
+	sourceBucketKey: MonetaryBucketKey
+	mint: CanonicalMintUrl
+	unit: string
+	state: MigrationItemState
+	cocoOperationId?: string
+	revision: number
+	quarantineReason?: MigrationQuarantineReason
+}
+
+export interface DomainCreationResult<T> {
+	created: boolean
+	value: Readonly<T>
+}
+
+/**
+ * Every mutation is normatively one linearizable atomic
+ * read/precondition/derive/write operation for its authority or item key. A
+ * conforming adapter may not implement these commands as an application-level
+ * load/await/save sequence, and callers never supply a replacement record.
+ */
 export interface MigrationCoordinatorStore {
-	load(walletKey: string): Promise<WalletAuthoritySnapshot | null>
-	create(snapshot: WalletAuthoritySnapshot): Promise<boolean>
-	compareAndSwap(walletKey: string, expected: AuthorityVersion, next: WalletAuthoritySnapshot): Promise<boolean>
-	loadItem(walletKey: string, itemId: string): Promise<MigrationItemRecord | null>
-	createItem(walletKey: string, item: MigrationItemRecord): Promise<boolean>
-	compareAndSwapItem(walletKey: string, itemId: string, expected: AuthorityVersion, next: MigrationItemRecord): Promise<boolean>
+	readonly atomicity: 'linearizable-domain-transition-v1'
+
+	loadAuthority(query: unknown): Promise<Readonly<AuthorityStatus>>
+	createInitialAuthority(command: unknown): Promise<DomainCreationResult<AuthorityStatus>>
+	advanceAuthorityPhase(command: unknown): Promise<Readonly<AuthorityStatus>>
+	permissionsFor(query: unknown): Promise<Readonly<MonetaryPermissionProjection>>
+	nip60Policy(query: unknown): Promise<Nip60Policy>
+
+	loadMigrationItem(query: unknown): Promise<Readonly<MigrationItemRecord>>
+	listMigrationItems(query: unknown): Promise<readonly Readonly<MigrationItemRecord>[]>
+	createPlannedMigrationItem(command: unknown): Promise<DomainCreationResult<MigrationItemRecord>>
+	bindCocoOperationOnce(command: unknown): Promise<Readonly<MigrationItemRecord>>
+	advanceMigrationItem(command: unknown): Promise<Readonly<MigrationItemRecord>>
+	quarantineMigrationItem(command: unknown): Promise<Readonly<MigrationItemRecord>>
+}
+
+function requireEpoch(value: unknown): string {
+	if (typeof value !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,255}$/.test(value)) {
+		fail('WRONG_EPOCH', 'Migration epoch must be a non-empty sanitized identifier')
+	}
+	return value
+}
+
+function requireRevision(value: unknown): number {
+	if (!Number.isSafeInteger(value) || (value as number) < 0) fail('STALE_REVISION', 'Revision must be a non-negative safe integer')
+	return value as number
+}
+
+function nextAuthorityPhase(current: MigrationPhase): MigrationPhase | null {
+	switch (current) {
+		case 'legacy-active':
+			return 'migration-snapshot-frozen'
+		case 'migration-snapshot-frozen':
+			return 'importing'
+		case 'importing':
+			return 'verifying'
+		case 'verifying':
+			return 'coco-ready'
+		case 'coco-ready':
+			return 'cutover-committed'
+		case 'cutover-committed':
+			return null
+	}
+}
+
+function assertLegalAuthorityAdvance(current: MigrationPhase, requested: unknown): MigrationPhase {
+	const next = parseMigrationPhase(requested)
+	if (nextAuthorityPhase(current) !== next) fail('INVALID_TRANSITION', `Cannot transition authority from ${current} to ${next}`)
+	return next
+}
+
+function projectCapabilitiesForOwner(owner: MonetaryOwner): MonetaryPermissionProjection['capabilities'] {
+	return Object.freeze({
+		legacyOrdinary: owner === 'legacy-ordinary',
+		legacyRecovery: owner === 'legacy-recovery-only',
+		cocoMigration: owner === 'coco-migration',
+		cocoOrdinary: owner === 'coco-canonical',
+		shadowDiagnostics: owner === 'coco-shadow',
+	})
+}
+
+function requireWalletKey(value: unknown): string {
+	return parseCocoWalletNamespace(value).namespace
+}
+
+function captureAuthorityQuery(input: unknown): { walletKey: string; migrationEpoch: string } {
+	const captured = captureObject(input, ['walletKey', 'migrationEpoch'], 'INVALID_TRANSITION', 'Authority query')
+	return { walletKey: requireWalletKey(captured.walletKey), migrationEpoch: requireEpoch(captured.migrationEpoch) }
+}
+
+function captureVersionedCommand(input: unknown, extraFields: readonly string[] = []): Readonly<Record<string, unknown>> {
+	return captureObject(
+		input,
+		['walletKey', 'migrationEpoch', 'expectedRevision', ...extraFields],
+		'INVALID_TRANSITION',
+		'Coordinator command',
+	)
+}
+
+function authorityProjection(record: AuthorityRecord): Readonly<AuthorityStatus> {
+	return Object.freeze({
+		walletKey: record.walletKey,
+		user: record.user,
+		environment: record.environment,
+		migrationEpoch: record.migrationEpoch,
+		revision: record.revision,
+		phase: record.phase,
+	})
+}
+
+function itemProjection(record: MigrationItemRecord): Readonly<MigrationItemRecord> {
+	return Object.freeze({
+		id: record.id,
+		walletKey: record.walletKey,
+		user: record.user,
+		environment: record.environment,
+		migrationEpoch: record.migrationEpoch,
+		sourceBucketKey: record.sourceBucketKey,
+		mint: record.mint,
+		unit: record.unit,
+		state: record.state,
+		revision: record.revision,
+		...(record.cocoOperationId ? { cocoOperationId: record.cocoOperationId } : {}),
+		...(record.quarantineReason ? { quarantineReason: record.quarantineReason } : {}),
+	})
+}
+
+function ownerForBucket(phase: MigrationPhase, bucket: MonetaryBucketIdentity, retainedRecovery: boolean): MonetaryOwner {
+	switch (bucket.kind) {
+		case 'unresolved':
+			return 'quarantined'
+		case 'legacy-inflight':
+		case 'pending-outbound':
+		case 'auction-p2pk-recovery':
+			return retainedRecovery ? 'legacy-recovery-only' : 'quarantined'
+		case 'coco-ordinary':
+			return phase === 'cutover-committed' ? 'coco-canonical' : 'coco-shadow'
+		case 'legacy-ready':
+			switch (phase) {
+				case 'legacy-active':
+					return 'legacy-ordinary'
+				case 'migration-snapshot-frozen':
+					return 'migration-coordinator'
+				case 'importing':
+				case 'verifying':
+				case 'coco-ready':
+					return 'coco-migration'
+				case 'cutover-committed':
+					return 'coco-canonical'
+			}
+	}
+}
+
+function policyForCurrentAuthority(phase: MigrationPhase): Nip60Policy {
+	switch (phase) {
+		case 'legacy-active':
+		case 'migration-snapshot-frozen':
+		case 'importing':
+		case 'verifying':
+		case 'coco-ready':
+			return 'keep-runtime'
+		case 'cutover-committed':
+			return 'keep-interop'
+	}
+}
+
+function parseItemAction(value: unknown): 'prepare' | 'begin-execution' | 'verify' {
+	const captured = captureObject(value, ['type'], 'INVALID_QUARANTINE_TRANSITION', 'Migration item action')
+	switch (captured.type) {
+		case 'prepare':
+		case 'begin-execution':
+		case 'verify':
+			return captured.type
+		default:
+			fail('INVALID_QUARANTINE_TRANSITION', 'Migration item action is invalid')
+	}
 }
 
 export class InMemoryMigrationCoordinatorStore implements MigrationCoordinatorStore {
-	readonly #records = new Map<string, WalletAuthoritySnapshot>()
+	readonly atomicity = 'linearizable-domain-transition-v1' as const
+	readonly #authorities = new Map<string, AuthorityRecord>()
 	readonly #items = new Map<string, Map<string, MigrationItemRecord>>()
 
-	async load(walletKey: string): Promise<WalletAuthoritySnapshot | null> {
-		const value = this.#records.get(walletKey)
-		return value ? structuredClone(value) : null
+	#requireAuthority(walletKey: string, migrationEpoch: string): AuthorityRecord {
+		const authority = this.#authorities.get(walletKey)
+		if (!authority) fail('COORDINATOR_RECORD_NOT_FOUND', 'Migration authority record was not found')
+		if (authority.migrationEpoch !== migrationEpoch) fail('WRONG_EPOCH', 'Migration authority belongs to another epoch')
+		return authority
 	}
 
-	async create(snapshot: WalletAuthoritySnapshot): Promise<boolean> {
-		assertAuthorityInvariant(snapshot)
-		if (this.#records.has(snapshot.walletKey)) return false
-		this.#records.set(snapshot.walletKey, structuredClone(snapshot))
-		return true
+	#requireVersion(authority: AuthorityRecord, expectedRevision: unknown): number {
+		const revision = requireRevision(expectedRevision)
+		if (authority.revision !== revision) fail('STALE_REVISION', 'Observed authority revision is not current')
+		return revision
 	}
 
-	async compareAndSwap(walletKey: string, expected: AuthorityVersion, next: WalletAuthoritySnapshot): Promise<boolean> {
-		assertAuthorityInvariant(next)
-		if (next.walletKey !== walletKey || next.migrationEpoch !== expected.migrationEpoch || next.revision !== expected.revision + 1) {
-			fail('INVALID_TRANSITION', 'Compare-and-swap replacement does not advance the observed authority')
-		}
-		const current = this.#records.get(walletKey)
-		if (!current || current.migrationEpoch !== expected.migrationEpoch || current.revision !== expected.revision) {
-			return false
-		}
-		this.#records.set(walletKey, structuredClone(next))
-		return true
-	}
-
-	async loadItem(walletKey: string, itemId: string): Promise<MigrationItemRecord | null> {
+	#requireItem(walletKey: string, migrationEpoch: string, itemId: string): MigrationItemRecord {
+		this.#requireAuthority(walletKey, migrationEpoch)
 		const item = this.#items.get(walletKey)?.get(itemId)
-		return item ? structuredClone(item) : null
-	}
-
-	async createItem(walletKey: string, item: MigrationItemRecord): Promise<boolean> {
-		const authority = this.#records.get(walletKey)
-		const validItem = validateMigrationItem(item)
-		if (!authority || authority.migrationEpoch !== validItem.migrationEpoch) {
-			fail('WRONG_EPOCH', 'Migration item does not belong to the current wallet epoch')
-		}
-		const items = this.#items.get(walletKey) ?? new Map<string, MigrationItemRecord>()
-		if (items.has(validItem.id)) return false
-		items.set(validItem.id, structuredClone(validItem))
-		this.#items.set(walletKey, items)
-		return true
-	}
-
-	async compareAndSwapItem(walletKey: string, itemId: string, expected: AuthorityVersion, next: MigrationItemRecord): Promise<boolean> {
-		const validNext = validateMigrationItem(next)
-		if (validNext.id !== itemId || validNext.migrationEpoch !== expected.migrationEpoch || validNext.revision !== expected.revision + 1) {
-			fail('INVALID_QUARANTINE_TRANSITION', 'Item compare-and-swap replacement is not the observed successor')
-		}
-		const authority = this.#records.get(walletKey)
-		const items = this.#items.get(walletKey)
-		const current = items?.get(itemId)
-		if (
-			!authority ||
-			authority.migrationEpoch !== expected.migrationEpoch ||
-			!current ||
-			current.migrationEpoch !== expected.migrationEpoch ||
-			current.revision !== expected.revision
-		) {
-			return false
-		}
-		items!.set(itemId, structuredClone(validNext))
-		return true
-	}
-}
-
-export class MigrationAuthorityCoordinator {
-	constructor(readonly store: MigrationCoordinatorStore) {}
-
-	async initialize(snapshot: WalletAuthoritySnapshot): Promise<void> {
-		assertAuthorityInvariant(snapshot)
-		if (!(await this.store.create(snapshot))) {
-			fail('COORDINATOR_RECORD_EXISTS', 'Migration authority record already exists')
-		}
-	}
-
-	async load(walletKey: string): Promise<WalletAuthoritySnapshot> {
-		const snapshot = await this.store.load(walletKey)
-		if (!snapshot) fail('COORDINATOR_RECORD_NOT_FOUND', 'Migration authority record was not found')
-		assertAuthorityInvariant(snapshot)
-		return snapshot
-	}
-
-	async transition(walletKey: string, observed: AuthorityVersion, targetPhase: MigrationPhase): Promise<WalletAuthoritySnapshot> {
-		const current = await this.load(walletKey)
-		assertObservedVersion(current, observed)
-		const next = transitionAuthority(current, observed, targetPhase)
-		if (!(await this.store.compareAndSwap(walletKey, observed, next))) {
-			fail('STALE_REVISION', 'Migration authority changed before compare-and-swap committed')
-		}
-		return next
-	}
-
-	async authorize(walletKey: string, observed: AuthorityVersion, bucketKey: string, capability: MonetaryCapability): Promise<void> {
-		const current = await this.load(walletKey)
-		authorizeMonetaryCapability(current, observed, bucketKey, capability)
-	}
-
-	async initializeItem(walletKey: string, item: MigrationItemRecord): Promise<void> {
-		const authority = await this.load(walletKey)
-		const validItem = validateMigrationItem(item)
-		if (authority.migrationEpoch !== validItem.migrationEpoch) {
-			fail('WRONG_EPOCH', 'Migration item does not belong to the current wallet epoch')
-		}
-		if (!(await this.store.createItem(walletKey, validItem))) {
-			fail('COORDINATOR_RECORD_EXISTS', 'Migration item already exists')
-		}
-	}
-
-	async loadItem(walletKey: string, itemId: string): Promise<MigrationItemRecord> {
-		const item = await this.store.loadItem(walletKey, itemId)
 		if (!item) fail('COORDINATOR_RECORD_NOT_FOUND', 'Migration item was not found')
-		return validateMigrationItem(item)
+		if (item.migrationEpoch !== migrationEpoch) fail('WRONG_EPOCH', 'Migration item belongs to another epoch')
+		return item
 	}
 
-	async transitionItem(
-		walletKey: string,
-		itemId: string,
-		observed: AuthorityVersion,
-		targetState: MigrationItemState,
-		options: { cocoOperationId?: string; quarantineReason?: MigrationQuarantineReason } = {},
-	): Promise<MigrationItemRecord> {
-		const current = await this.loadItem(walletKey, itemId)
-		if (current.migrationEpoch !== observed.migrationEpoch) {
-			fail('WRONG_EPOCH', 'Observed migration item epoch is not current')
-		}
-		if (current.revision !== observed.revision) {
-			fail('STALE_REVISION', 'Observed migration item revision is not current')
-		}
-		const next = transitionMigrationItem(current, observed.revision, targetState, options)
-		if (!(await this.store.compareAndSwapItem(walletKey, itemId, observed, next))) {
-			fail('STALE_REVISION', 'Migration item changed before compare-and-swap committed')
-		}
-		return next
-	}
-}
-
-const ITEM_TRANSITIONS: Record<MigrationItemState, readonly MigrationItemState[]> = {
-	planned: ['prepared', 'quarantined'],
-	prepared: ['executing', 'quarantined'],
-	executing: ['verified', 'quarantined'],
-	verified: [],
-	quarantined: [],
-}
-
-export function createMigrationItem(input: unknown): MigrationItemRecord {
-	if (!input || typeof input !== 'object' || Array.isArray(input)) {
-		fail('INVALID_QUARANTINE_TRANSITION', 'Migration item input must be an object')
-	}
-	const candidate = input as {
-		id?: unknown
-		migrationEpoch?: unknown
-		sourceBucket?: unknown
-	}
-	const id = requireSafeId(candidate.id, 'migration item id')
-	const migrationEpoch = requireSafeId(candidate.migrationEpoch, 'migrationEpoch')
-	const sourceBucket = createMonetaryBucketIdentity(candidate.sourceBucket)
-	return Object.freeze({
-		id,
-		migrationEpoch,
-		sourceBucketKey: monetaryBucketKey(sourceBucket),
-		user: normalizeNostrPubkey(sourceBucket.user),
-		mint: normalizeMintUrl(sourceBucket.mint),
-		unit: normalizeUnit(sourceBucket.unit),
-		state: 'planned',
-		revision: 0,
-	})
-}
-
-export function validateMigrationItem(value: unknown): MigrationItemRecord {
-	if (
-		!value ||
-		typeof value !== 'object' ||
-		Array.isArray(value) ||
-		!Object.keys(value).every((key) =>
-			[
-				'id',
-				'migrationEpoch',
-				'sourceBucketKey',
-				'user',
-				'mint',
-				'unit',
-				'state',
-				'cocoOperationId',
-				'revision',
-				'quarantineReason',
-			].includes(key),
+	async createInitialAuthority(command: unknown): Promise<DomainCreationResult<AuthorityStatus>> {
+		const captured = captureObject(
+			command,
+			['walletIdentity', 'environment', 'migrationEpoch'],
+			'INVALID_TRANSITION',
+			'Initial authority command',
 		)
-	) {
-		fail('INVALID_QUARANTINE_TRANSITION', 'Migration item is invalid')
+		const user = normalizeNostrPubkey(captured.walletIdentity)
+		const environment = parseCocoEnvironment(captured.environment)
+		const migrationEpoch = requireEpoch(captured.migrationEpoch)
+		const walletKey = buildCocoWalletNamespace({ environment, pubkey: user })
+		const existing = this.#authorities.get(walletKey)
+		if (existing) {
+			if (existing.migrationEpoch !== migrationEpoch) fail('WRONG_EPOCH', 'Wallet authority already exists for another epoch')
+			return Object.freeze({ created: false, value: authorityProjection(existing) })
+		}
+		const record: AuthorityRecord = { walletKey, user, environment, migrationEpoch, revision: 0, phase: 'legacy-active' }
+		this.#authorities.set(walletKey, record)
+		return Object.freeze({ created: true, value: authorityProjection(record) })
 	}
-	const item = value as MigrationItemRecord
-	if (!ITEM_TRANSITIONS[item.state]) {
-		fail('INVALID_QUARANTINE_TRANSITION', 'Migration item state is invalid')
+
+	async loadAuthority(query: unknown): Promise<Readonly<AuthorityStatus>> {
+		const { walletKey, migrationEpoch } = captureAuthorityQuery(query)
+		return authorityProjection(this.#requireAuthority(walletKey, migrationEpoch))
 	}
-	const normalized: MigrationItemRecord = {
-		id: requireSafeId(item.id, 'migration item id'),
-		migrationEpoch: requireSafeId(item.migrationEpoch, 'migrationEpoch'),
-		sourceBucketKey: item.sourceBucketKey,
-		user: normalizeNostrPubkey(item.user),
-		mint: normalizeMintUrl(item.mint),
-		unit: normalizeUnit(item.unit),
-		state: item.state,
-		revision: item.revision,
-		...(item.cocoOperationId ? { cocoOperationId: requireSafeId(item.cocoOperationId, 'cocoOperationId') } : {}),
-		...(item.quarantineReason ? { quarantineReason: item.quarantineReason } : {}),
+
+	async advanceAuthorityPhase(command: unknown): Promise<Readonly<AuthorityStatus>> {
+		const captured = captureVersionedCommand(command, ['nextPhase'])
+		const walletKey = requireWalletKey(captured.walletKey)
+		const migrationEpoch = requireEpoch(captured.migrationEpoch)
+		const authority = this.#requireAuthority(walletKey, migrationEpoch)
+		this.#requireVersion(authority, captured.expectedRevision)
+		const nextPhase = assertLegalAuthorityAdvance(authority.phase, captured.nextPhase)
+		const next: AuthorityRecord = { ...authority, phase: nextPhase, revision: authority.revision + 1 }
+		this.#authorities.set(walletKey, next)
+		return authorityProjection(next)
 	}
-	if (
-		typeof normalized.sourceBucketKey !== 'string' ||
-		normalized.sourceBucketKey.length === 0 ||
-		normalized.sourceBucketKey.length > 2048 ||
-		/[\u0000-\u001f\u007f]/.test(normalized.sourceBucketKey) ||
-		!normalized.sourceBucketKey.startsWith(`${normalized.user}|${normalized.mint}|${normalized.unit}|`)
-	) {
-		fail('INVALID_QUARANTINE_TRANSITION', 'Migration source bucket key is invalid')
+
+	async permissionsFor(query: unknown): Promise<Readonly<MonetaryPermissionProjection>> {
+		const captured = captureObject(query, ['walletKey', 'migrationEpoch', 'bucketKey'], 'BUCKET_OWNERSHIP_MISMATCH', 'Permission query')
+		const walletKey = requireWalletKey(captured.walletKey)
+		const migrationEpoch = requireEpoch(captured.migrationEpoch)
+		const authority = this.#requireAuthority(walletKey, migrationEpoch)
+		const bucketKey = monetaryBucketKey(decodeMonetaryBucketKey(captured.bucketKey))
+		const bucket = decodeMonetaryBucketKey(bucketKey)
+		if (bucket.user !== authority.user) fail('BUCKET_OWNERSHIP_MISMATCH', 'Bucket user does not match wallet authority')
+		const retainedRecovery = [...(this.#items.get(walletKey)?.values() ?? [])].some(
+			(item) =>
+				item.migrationEpoch === migrationEpoch &&
+				item.sourceBucketKey === bucketKey &&
+				item.state !== 'verified' &&
+				item.state !== 'quarantined',
+		)
+		const owner = ownerForBucket(authority.phase, bucket, retainedRecovery)
+		return Object.freeze({
+			...authorityProjection(authority),
+			bucketKey,
+			owner,
+			capabilities: projectCapabilitiesForOwner(owner),
+		})
 	}
-	if (!Number.isSafeInteger(normalized.revision) || normalized.revision < 0) {
-		fail('INVALID_QUARANTINE_TRANSITION', 'Migration item revision is invalid')
+
+	async nip60Policy(query: unknown): Promise<Nip60Policy> {
+		const { walletKey, migrationEpoch } = captureAuthorityQuery(query)
+		return policyForCurrentAuthority(this.#requireAuthority(walletKey, migrationEpoch).phase)
 	}
-	if (normalized.quarantineReason !== undefined && !MIGRATION_QUARANTINE_REASONS.includes(normalized.quarantineReason)) {
-		fail('INVALID_QUARANTINE_TRANSITION', 'Migration item quarantine reason is invalid')
+
+	async createPlannedMigrationItem(command: unknown): Promise<DomainCreationResult<MigrationItemRecord>> {
+		const captured = captureObject(
+			command,
+			['walletKey', 'migrationEpoch', 'itemId', 'sourceBucket'],
+			'INVALID_QUARANTINE_TRANSITION',
+			'Create migration item command',
+		)
+		const walletKey = requireWalletKey(captured.walletKey)
+		const migrationEpoch = requireEpoch(captured.migrationEpoch)
+		const authority = this.#requireAuthority(walletKey, migrationEpoch)
+		if (authority.phase === 'cutover-committed') {
+			fail('INVALID_QUARANTINE_TRANSITION', 'New migration items cannot be created after cutover')
+		}
+		const id = requireSafeId(captured.itemId, 'migration item id')
+		const sourceBucket = createMonetaryBucketIdentity(captured.sourceBucket)
+		if (sourceBucket.user !== authority.user) fail('BUCKET_OWNERSHIP_MISMATCH', 'Migration source belongs to another wallet')
+		if (sourceBucket.kind === 'coco-ordinary') fail('INVALID_QUARANTINE_TRANSITION', 'Coco ordinary value is not a legacy migration source')
+		const sourceBucketKey = monetaryBucketKey(sourceBucket)
+		const items = this.#items.get(walletKey) ?? new Map<string, MigrationItemRecord>()
+		const existing = items.get(id)
+		if (existing) {
+			if (existing.migrationEpoch === migrationEpoch && existing.sourceBucketKey === sourceBucketKey) {
+				return Object.freeze({ created: false, value: itemProjection(existing) })
+			}
+			fail('COORDINATOR_RECORD_EXISTS', 'Migration item identity already exists with different binding')
+		}
+		const record: MigrationItemRecord = {
+			id,
+			walletKey,
+			user: authority.user,
+			environment: authority.environment,
+			migrationEpoch,
+			sourceBucketKey,
+			mint: canonicalizeMintUrl(sourceBucket.mint),
+			unit: normalizeUnit(sourceBucket.unit),
+			state: 'planned',
+			revision: 0,
+		}
+		items.set(id, record)
+		this.#items.set(walletKey, items)
+		return Object.freeze({ created: true, value: itemProjection(record) })
 	}
-	if (normalized.state === 'quarantined' && !normalized.quarantineReason) {
-		fail('INVALID_QUARANTINE_TRANSITION', 'Quarantined migration item requires a reason')
+
+	async loadMigrationItem(query: unknown): Promise<Readonly<MigrationItemRecord>> {
+		const captured = captureObject(
+			query,
+			['walletKey', 'migrationEpoch', 'itemId'],
+			'INVALID_QUARANTINE_TRANSITION',
+			'Migration item query',
+		)
+		return itemProjection(
+			this.#requireItem(
+				requireWalletKey(captured.walletKey),
+				requireEpoch(captured.migrationEpoch),
+				requireSafeId(captured.itemId, 'itemId'),
+			),
+		)
 	}
-	if (normalized.state !== 'quarantined' && normalized.quarantineReason) {
-		fail('INVALID_QUARANTINE_TRANSITION', 'Only quarantined migration items may contain a reason')
+
+	async listMigrationItems(query: unknown): Promise<readonly Readonly<MigrationItemRecord>[]> {
+		const { walletKey, migrationEpoch } = captureAuthorityQuery(query)
+		this.#requireAuthority(walletKey, migrationEpoch)
+		return Object.freeze(
+			[...(this.#items.get(walletKey)?.values() ?? [])]
+				.filter((item) => item.migrationEpoch === migrationEpoch)
+				.map(itemProjection)
+				.sort((left, right) => left.id.localeCompare(right.id)),
+		)
 	}
-	if ((normalized.state === 'executing' || normalized.state === 'verified') && !normalized.cocoOperationId) {
-		fail('INVALID_QUARANTINE_TRANSITION', 'Executing and verified items require a Coco operation ID')
+
+	async bindCocoOperationOnce(command: unknown): Promise<Readonly<MigrationItemRecord>> {
+		const captured = captureVersionedCommand(command, ['itemId', 'operationId'])
+		const walletKey = requireWalletKey(captured.walletKey)
+		const migrationEpoch = requireEpoch(captured.migrationEpoch)
+		const itemId = requireSafeId(captured.itemId, 'itemId')
+		const item = this.#requireItem(walletKey, migrationEpoch, itemId)
+		const expectedRevision = requireRevision(captured.expectedRevision)
+		if (item.revision !== expectedRevision) fail('STALE_REVISION', 'Observed migration item revision is not current')
+		if (item.state !== 'planned' && item.state !== 'prepared') fail('INVALID_QUARANTINE_TRANSITION', 'Operation cannot bind in this state')
+		if (item.cocoOperationId) fail('INVALID_QUARANTINE_TRANSITION', 'Coco operation identity is already bound')
+		const next: MigrationItemRecord = {
+			...item,
+			cocoOperationId: requireSafeId(captured.operationId, 'operationId'),
+			revision: item.revision + 1,
+		}
+		this.#items.get(walletKey)!.set(itemId, next)
+		return itemProjection(next)
 	}
-	return Object.freeze(normalized)
+
+	async advanceMigrationItem(command: unknown): Promise<Readonly<MigrationItemRecord>> {
+		const captured = captureVersionedCommand(command, ['itemId', 'action'])
+		const walletKey = requireWalletKey(captured.walletKey)
+		const migrationEpoch = requireEpoch(captured.migrationEpoch)
+		const itemId = requireSafeId(captured.itemId, 'itemId')
+		const item = this.#requireItem(walletKey, migrationEpoch, itemId)
+		const expectedRevision = requireRevision(captured.expectedRevision)
+		if (item.revision !== expectedRevision) fail('STALE_REVISION', 'Observed migration item revision is not current')
+		const action = parseItemAction(captured.action)
+		let nextState: MigrationItemState
+		if (item.state === 'planned' && action === 'prepare') nextState = 'prepared'
+		else if (item.state === 'prepared' && action === 'begin-execution' && item.cocoOperationId) nextState = 'executing'
+		else if (item.state === 'executing' && action === 'verify') nextState = 'verified'
+		else fail('INVALID_QUARANTINE_TRANSITION', `Action ${action} is invalid from ${parseMigrationItemState(item.state)}`)
+		const next: MigrationItemRecord = { ...item, state: nextState, revision: item.revision + 1 }
+		this.#items.get(walletKey)!.set(itemId, next)
+		return itemProjection(next)
+	}
+
+	async quarantineMigrationItem(command: unknown): Promise<Readonly<MigrationItemRecord>> {
+		const captured = captureVersionedCommand(command, ['itemId', 'reason'])
+		const walletKey = requireWalletKey(captured.walletKey)
+		const migrationEpoch = requireEpoch(captured.migrationEpoch)
+		const itemId = requireSafeId(captured.itemId, 'itemId')
+		const item = this.#requireItem(walletKey, migrationEpoch, itemId)
+		const expectedRevision = requireRevision(captured.expectedRevision)
+		if (item.revision !== expectedRevision) fail('STALE_REVISION', 'Observed migration item revision is not current')
+		if (item.state === 'verified' || item.state === 'quarantined') {
+			fail('INVALID_QUARANTINE_TRANSITION', 'Terminal migration item cannot be quarantined or reopened')
+		}
+		const next: MigrationItemRecord = {
+			...item,
+			state: 'quarantined',
+			quarantineReason: parseQuarantineReason(captured.reason),
+			revision: item.revision + 1,
+		}
+		this.#items.get(walletKey)!.set(itemId, next)
+		return itemProjection(next)
+	}
 }
 
-export function transitionMigrationItem(
-	item: MigrationItemRecord,
-	expectedRevision: number,
-	targetState: MigrationItemState,
-	options: { cocoOperationId?: string; quarantineReason?: MigrationQuarantineReason } = {},
-): MigrationItemRecord {
-	const normalized = validateMigrationItem(item)
-	if (!options || typeof options !== 'object' || Array.isArray(options)) {
-		fail('INVALID_QUARANTINE_TRANSITION', 'Migration item transition options are invalid')
+export class MigrationCoordinator {
+	readonly #store: MigrationCoordinatorStore
+
+	constructor(store: MigrationCoordinatorStore) {
+		if (!store || store.atomicity !== 'linearizable-domain-transition-v1') {
+			fail('INVALID_TRANSITION', 'Migration store does not declare the required atomic domain semantics')
+		}
+		this.#store = store
 	}
-	if (!Object.keys(options).every((key) => key === 'cocoOperationId' || key === 'quarantineReason')) {
-		fail('INVALID_QUARANTINE_TRANSITION', 'Migration item transition options contain undeclared fields')
+
+	initialize(command: unknown): Promise<DomainCreationResult<AuthorityStatus>> {
+		return this.#store.createInitialAuthority(command)
 	}
-	if (normalized.revision !== expectedRevision) fail('STALE_REVISION', 'Migration item revision is stale')
-	if (!ITEM_TRANSITIONS[normalized.state].includes(targetState)) {
-		fail('INVALID_QUARANTINE_TRANSITION', `Cannot transition migration item from ${normalized.state} to ${targetState}`)
+
+	status(query: unknown): Promise<Readonly<AuthorityStatus>> {
+		return this.#store.loadAuthority(query)
 	}
-	if (targetState === 'quarantined' && (!options.quarantineReason || !MIGRATION_QUARANTINE_REASONS.includes(options.quarantineReason))) {
-		fail('INVALID_QUARANTINE_TRANSITION', 'Quarantine requires a sanitized reason')
+
+	advanceAuthority(command: unknown): Promise<Readonly<AuthorityStatus>> {
+		return this.#store.advanceAuthorityPhase(command)
 	}
-	if (targetState !== 'quarantined' && options.quarantineReason !== undefined) {
-		fail('INVALID_QUARANTINE_TRANSITION', 'Quarantine reason is only valid for quarantined items')
+
+	permissionsFor(query: unknown): Promise<Readonly<MonetaryPermissionProjection>> {
+		return this.#store.permissionsFor(query)
 	}
-	const requestedOperationId = options.cocoOperationId
-		? requireSafeId(options.cocoOperationId, 'cocoOperationId')
-		: normalized.cocoOperationId
-	if (normalized.cocoOperationId && requestedOperationId !== normalized.cocoOperationId) {
-		fail('INVALID_QUARANTINE_TRANSITION', 'A bound Coco operation ID cannot be replaced')
+
+	nip60Policy(query: unknown): Promise<Nip60Policy> {
+		return this.#store.nip60Policy(query)
 	}
-	const cocoOperationId = requestedOperationId
-	if ((targetState === 'executing' || targetState === 'verified') && !cocoOperationId) {
-		fail('INVALID_QUARANTINE_TRANSITION', 'Executing and verified items require a Coco operation ID')
+
+	createPlannedItem(command: unknown): Promise<DomainCreationResult<MigrationItemRecord>> {
+		return this.#store.createPlannedMigrationItem(command)
 	}
-	return Object.freeze({
-		id: normalized.id,
-		migrationEpoch: normalized.migrationEpoch,
-		sourceBucketKey: normalized.sourceBucketKey,
-		user: normalized.user,
-		mint: normalized.mint,
-		unit: normalized.unit,
-		state: targetState,
-		revision: normalized.revision + 1,
-		...(cocoOperationId ? { cocoOperationId } : {}),
-		...(options.quarantineReason ? { quarantineReason: options.quarantineReason } : {}),
-	})
+
+	item(query: unknown): Promise<Readonly<MigrationItemRecord>> {
+		return this.#store.loadMigrationItem(query)
+	}
+
+	items(query: unknown): Promise<readonly Readonly<MigrationItemRecord>[]> {
+		return this.#store.listMigrationItems(query)
+	}
+
+	bindCocoOperation(command: unknown): Promise<Readonly<MigrationItemRecord>> {
+		return this.#store.bindCocoOperationOnce(command)
+	}
+
+	advanceItem(command: unknown): Promise<Readonly<MigrationItemRecord>> {
+		return this.#store.advanceMigrationItem(command)
+	}
+
+	quarantineItem(command: unknown): Promise<Readonly<MigrationItemRecord>> {
+		return this.#store.quarantineMigrationItem(command)
+	}
 }

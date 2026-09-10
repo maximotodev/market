@@ -1,104 +1,292 @@
-import { fail } from '../errors'
-import { normalizeMintUrl, normalizeUnit } from './types'
+import { captureArray, captureObject, fail } from '../errors'
 import { normalizeNostrPubkey } from '../namespace'
+import { canonicalizeMintUrl, normalizeUnit, type CanonicalMintUrl } from './types'
 
-export interface MigrationValueAccounting {
+export type MigrationSourceCategory = 'legacy-ready' | 'legacy-locked' | 'legacy-unresolved' | 'legacy-pending-outbound'
+
+export type MigrationDestinationDisposition =
+	| 'coco-ready'
+	| 'coco-reserved'
+	| 'retained-legacy-workflow'
+	| 'quarantined'
+	| 'verified-consumed-external'
+
+/**
+ * Arithmetic input only. A claim ID is not proof-of-value authority; I1B must
+ * load claims from a sealed protected inventory before this checker is used for
+ * an authoritative migration decision.
+ */
+export interface MigrationAccountingClaim {
+	claimId: string
+	migrationEpoch: string
 	user: string
-	mint: string
+	mint: CanonicalMintUrl
 	unit: string
-	legacyReady: bigint
-	legacyLocked: bigint
-	legacyUnresolved: bigint
-	legacyPendingOutbound: bigint
-	alreadyCocoOwned: bigint
-	cocoReady: bigint
-	cocoReserved: bigint
-	retainedLegacyWorkflow: bigint
-	quarantined: bigint
-	verifiedConsumedExternal: bigint
+	sourceAmount: bigint
+	sourceCategory: MigrationSourceCategory
+	destinationDisposition: MigrationDestinationDisposition
+	destinationAmount: bigint
+	verifiedProtocolFee: bigint
 }
 
-export type MigrationAccountingResult =
-	| { ok: true; sourceTotal: bigint; destinationTotal: bigint }
+export interface CocoOpeningBaseline {
+	baselineId: string
+	migrationEpoch: string
+	user: string
+	mint: CanonicalMintUrl
+	unit: string
+	amount: bigint
+}
+
+export interface MigrationAccountingMismatch {
+	claimId: string
+	sourceAmount: bigint
+	destinationAmount: bigint
+	verifiedProtocolFee: bigint
+	delta: bigint
+}
+
+export type MigrationAccountingReport =
+	| {
+			ok: true
+			migrationEpoch: string
+			user: string
+			mint: CanonicalMintUrl
+			unit: string
+			openingCocoAmount: bigint
+			migrationSourceTotal: bigint
+			destinationTotal: bigint
+			verifiedProtocolFeeTotal: bigint
+			claimCount: number
+	  }
 	| {
 			ok: false
 			code: 'ACCOUNTING_MISMATCH'
-			sourceTotal: bigint
+			migrationEpoch: string
+			user: string
+			mint: CanonicalMintUrl
+			unit: string
+			openingCocoAmount: bigint
+			migrationSourceTotal: bigint
 			destinationTotal: bigint
-			delta: bigint
+			verifiedProtocolFeeTotal: bigint
+			claimCount: number
+			mismatches: readonly Readonly<MigrationAccountingMismatch>[]
 	  }
 
-const AMOUNT_FIELDS = [
-	'legacyReady',
-	'legacyLocked',
-	'legacyUnresolved',
-	'legacyPendingOutbound',
-	'alreadyCocoOwned',
-	'cocoReady',
-	'cocoReserved',
-	'retainedLegacyWorkflow',
-	'quarantined',
-	'verifiedConsumedExternal',
-] as const satisfies readonly (keyof MigrationValueAccounting)[]
-
-function accountingKey(value: Pick<MigrationValueAccounting, 'user' | 'mint' | 'unit'>): string {
-	return `${value.user}|${value.mint}|${value.unit}`
+interface CapturedInventory {
+	migrationEpoch: string
+	user: string
+	mint: CanonicalMintUrl
+	unit: string
+	openingCocoBaseline: Readonly<CocoOpeningBaseline> | null
+	claims: readonly Readonly<MigrationAccountingClaim>[]
 }
 
-export function validateMigrationAccounting(value: unknown): MigrationValueAccounting {
-	if (!value || typeof value !== 'object' || Array.isArray(value)) {
-		fail('ACCOUNTING_INPUT_INVALID', 'Migration accounting must be an object')
+function requireEpoch(value: unknown): string {
+	if (typeof value !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,255}$/.test(value)) {
+		fail('ACCOUNTING_INPUT_INVALID', 'Accounting migration epoch is invalid')
 	}
-	const candidate = value as Partial<MigrationValueAccounting>
-	for (const field of AMOUNT_FIELDS) {
-		const amount = candidate[field]
-		if (typeof amount !== 'bigint' || amount < 0n) {
-			fail('ACCOUNTING_INPUT_INVALID', `${field} must be a non-negative bigint`)
-		}
+	return value
+}
+
+function requireAccountingId(value: unknown, field: string): string {
+	if (typeof value !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,255}$/.test(value)) {
+		fail('ACCOUNTING_INPUT_INVALID', `${field} must be a non-empty sanitized identifier`)
 	}
+	return value
+}
+
+function requireAmount(value: unknown, field: string): bigint {
+	if (typeof value !== 'bigint' || value < 0n) fail('ACCOUNTING_INPUT_INVALID', `${field} must be a non-negative bigint`)
+	return value
+}
+
+function parseSourceCategory(value: unknown): MigrationSourceCategory {
+	switch (value) {
+		case 'legacy-ready':
+		case 'legacy-locked':
+		case 'legacy-unresolved':
+		case 'legacy-pending-outbound':
+			return value
+		default:
+			fail('ACCOUNTING_INPUT_INVALID', 'Migration source category is invalid')
+	}
+}
+
+function parseDestinationDisposition(value: unknown): MigrationDestinationDisposition {
+	switch (value) {
+		case 'coco-ready':
+		case 'coco-reserved':
+		case 'retained-legacy-workflow':
+		case 'quarantined':
+		case 'verified-consumed-external':
+			return value
+		default:
+			fail('ACCOUNTING_INPUT_INVALID', 'Migration destination disposition is invalid')
+	}
+}
+
+function captureClaim(value: unknown): Readonly<MigrationAccountingClaim> {
+	const captured = captureObject(
+		value,
+		[
+			'claimId',
+			'migrationEpoch',
+			'user',
+			'mint',
+			'unit',
+			'sourceAmount',
+			'sourceCategory',
+			'destinationDisposition',
+			'destinationAmount',
+			'verifiedProtocolFee',
+		],
+		'ACCOUNTING_INPUT_INVALID',
+		'Migration claim',
+	)
+	const claim = Object.freeze({
+		claimId: requireAccountingId(captured.claimId, 'claimId'),
+		migrationEpoch: requireEpoch(captured.migrationEpoch),
+		user: normalizeNostrPubkey(captured.user),
+		mint: canonicalizeMintUrl(captured.mint),
+		unit: normalizeUnit(captured.unit),
+		sourceAmount: requireAmount(captured.sourceAmount, 'sourceAmount'),
+		sourceCategory: parseSourceCategory(captured.sourceCategory),
+		destinationDisposition: parseDestinationDisposition(captured.destinationDisposition),
+		destinationAmount: requireAmount(captured.destinationAmount, 'destinationAmount'),
+		verifiedProtocolFee: requireAmount(captured.verifiedProtocolFee, 'verifiedProtocolFee'),
+	})
+	if (
+		(claim.destinationDisposition === 'retained-legacy-workflow' || claim.destinationDisposition === 'quarantined') &&
+		claim.verifiedProtocolFee !== 0n
+	) {
+		fail('ACCOUNTING_INPUT_INVALID', 'Retained and quarantined claims cannot charge a protocol fee')
+	}
+	return claim
+}
+
+function captureOpeningBaseline(value: unknown): Readonly<CocoOpeningBaseline> | null {
+	if (value === null) return null
+	const captured = captureObject(
+		value,
+		['baselineId', 'migrationEpoch', 'user', 'mint', 'unit', 'amount'],
+		'ACCOUNTING_INPUT_INVALID',
+		'Coco opening baseline',
+	)
 	return Object.freeze({
-		user: normalizeNostrPubkey(candidate.user),
-		mint: normalizeMintUrl(candidate.mint),
-		unit: normalizeUnit(candidate.unit),
-		legacyReady: candidate.legacyReady,
-		legacyLocked: candidate.legacyLocked,
-		legacyUnresolved: candidate.legacyUnresolved,
-		legacyPendingOutbound: candidate.legacyPendingOutbound,
-		alreadyCocoOwned: candidate.alreadyCocoOwned,
-		cocoReady: candidate.cocoReady,
-		cocoReserved: candidate.cocoReserved,
-		retainedLegacyWorkflow: candidate.retainedLegacyWorkflow,
-		quarantined: candidate.quarantined,
-		verifiedConsumedExternal: candidate.verifiedConsumedExternal,
-	}) as MigrationValueAccounting
+		baselineId: requireAccountingId(captured.baselineId, 'baselineId'),
+		migrationEpoch: requireEpoch(captured.migrationEpoch),
+		user: normalizeNostrPubkey(captured.user),
+		mint: canonicalizeMintUrl(captured.mint),
+		unit: normalizeUnit(captured.unit),
+		amount: requireAmount(captured.amount, 'opening baseline amount'),
+	})
 }
 
-export function checkValueConservation(value: unknown): MigrationAccountingResult {
-	const row = validateMigrationAccounting(value)
-	const sourceTotal = row.legacyReady + row.legacyLocked + row.legacyUnresolved + row.legacyPendingOutbound + row.alreadyCocoOwned
-	const destinationTotal = row.cocoReady + row.cocoReserved + row.retainedLegacyWorkflow + row.quarantined + row.verifiedConsumedExternal
-	if (sourceTotal !== destinationTotal) {
-		return Object.freeze({
-			ok: false,
-			code: 'ACCOUNTING_MISMATCH',
-			sourceTotal,
-			destinationTotal,
-			delta: destinationTotal - sourceTotal,
-		})
+function captureInventory(value: unknown): CapturedInventory {
+	const captured = captureObject(
+		value,
+		['migrationEpoch', 'user', 'mint', 'unit', 'openingCocoBaseline', 'claims'],
+		'ACCOUNTING_INPUT_INVALID',
+		'Migration accounting inventory',
+	)
+	const migrationEpoch = requireEpoch(captured.migrationEpoch)
+	const user = normalizeNostrPubkey(captured.user)
+	const mint = canonicalizeMintUrl(captured.mint)
+	const unit = normalizeUnit(captured.unit)
+	const openingCocoBaseline = captureOpeningBaseline(captured.openingCocoBaseline)
+	const claims = captureArray(captured.claims, 'ACCOUNTING_INPUT_INVALID', 'Migration claims').map(captureClaim)
+	const seen = new Set<string>()
+
+	if (
+		openingCocoBaseline &&
+		(openingCocoBaseline.migrationEpoch !== migrationEpoch ||
+			openingCocoBaseline.user !== user ||
+			openingCocoBaseline.mint !== mint ||
+			openingCocoBaseline.unit !== unit)
+	) {
+		fail('ACCOUNTING_INPUT_INVALID', 'Coco opening baseline does not match its inventory binding')
 	}
-	return Object.freeze({ ok: true, sourceTotal, destinationTotal })
-}
 
-export function checkIndependentValueConservation(values: unknown): Map<string, MigrationAccountingResult> {
-	if (!Array.isArray(values)) fail('ACCOUNTING_INPUT_INVALID', 'Migration accounting rows must be an array')
-	const results = new Map<string, MigrationAccountingResult>()
-	for (const value of values) {
-		const row = validateMigrationAccounting(value)
-		const key = accountingKey(row)
-		if (results.has(key)) {
-			fail('ACCOUNTING_INPUT_INVALID', 'Duplicate user, mint, and unit accounting row')
+	for (const claim of claims) {
+		if (seen.has(claim.claimId)) fail('ACCOUNTING_INPUT_INVALID', 'Duplicate migration claim ID')
+		seen.add(claim.claimId)
+		if (openingCocoBaseline?.baselineId === claim.claimId) {
+			fail('ACCOUNTING_INPUT_INVALID', 'Coco opening baseline cannot duplicate a migration claim')
 		}
-		results.set(key, checkValueConservation(row))
+		if (claim.migrationEpoch !== migrationEpoch || claim.user !== user || claim.mint !== mint || claim.unit !== unit) {
+			fail('ACCOUNTING_INPUT_INVALID', 'Migration claim does not match its inventory binding')
+		}
 	}
-	return results
+
+	return { migrationEpoch, user, mint, unit, openingCocoBaseline, claims: Object.freeze(claims) }
+}
+
+function reportForInventory(inventory: CapturedInventory): Readonly<MigrationAccountingReport> {
+	let migrationSourceTotal = 0n
+	let destinationTotal = 0n
+	let verifiedProtocolFeeTotal = 0n
+	const mismatches: Readonly<MigrationAccountingMismatch>[] = []
+	for (const claim of inventory.claims) {
+		migrationSourceTotal += claim.sourceAmount
+		destinationTotal += claim.destinationAmount
+		verifiedProtocolFeeTotal += claim.verifiedProtocolFee
+		if (claim.sourceAmount !== claim.destinationAmount + claim.verifiedProtocolFee) {
+			mismatches.push(
+				Object.freeze({
+					claimId: claim.claimId,
+					sourceAmount: claim.sourceAmount,
+					destinationAmount: claim.destinationAmount,
+					verifiedProtocolFee: claim.verifiedProtocolFee,
+					delta: claim.destinationAmount + claim.verifiedProtocolFee - claim.sourceAmount,
+				}),
+			)
+		}
+	}
+	const common = {
+		migrationEpoch: inventory.migrationEpoch,
+		user: inventory.user,
+		mint: inventory.mint,
+		unit: inventory.unit,
+		openingCocoAmount: inventory.openingCocoBaseline?.amount ?? 0n,
+		migrationSourceTotal,
+		destinationTotal,
+		verifiedProtocolFeeTotal,
+		claimCount: inventory.claims.length,
+	}
+	return mismatches.length === 0
+		? Object.freeze({ ok: true, ...common })
+		: Object.freeze({ ok: false, code: 'ACCOUNTING_MISMATCH', ...common, mismatches: Object.freeze(mismatches) })
+}
+
+export function checkMigrationInventory(value: unknown): Readonly<MigrationAccountingReport> {
+	return reportForInventory(captureInventory(value))
+}
+
+export function checkIndependentMigrationAccounting(value: unknown): readonly Readonly<MigrationAccountingReport>[] {
+	const inventories = captureArray(value, 'ACCOUNTING_INPUT_INVALID', 'Migration accounting inventories').map(captureInventory)
+	const inventoryKeys = new Set<string>()
+	const globalClaimIds = new Set<string>()
+	const globalBaselineIds = new Set<string>()
+	for (const inventory of inventories) {
+		const inventoryKey = JSON.stringify([inventory.migrationEpoch, inventory.user, inventory.mint, inventory.unit])
+		if (inventoryKeys.has(inventoryKey)) fail('ACCOUNTING_INPUT_INVALID', 'Duplicate accounting inventory binding')
+		inventoryKeys.add(inventoryKey)
+		if (inventory.openingCocoBaseline) {
+			const baselineKey = JSON.stringify([inventory.migrationEpoch, inventory.openingCocoBaseline.baselineId])
+			if (globalBaselineIds.has(baselineKey) || globalClaimIds.has(baselineKey)) {
+				fail('ACCOUNTING_INPUT_INVALID', 'Coco opening baseline identity is duplicated across inventories')
+			}
+			globalBaselineIds.add(baselineKey)
+		}
+		for (const claim of inventory.claims) {
+			const claimKey = JSON.stringify([inventory.migrationEpoch, claim.claimId])
+			if (globalClaimIds.has(claimKey) || globalBaselineIds.has(claimKey)) {
+				fail('ACCOUNTING_INPUT_INVALID', 'Migration claim ID is duplicated across inventories')
+			}
+			globalClaimIds.add(claimKey)
+		}
+	}
+	return Object.freeze(inventories.map(reportForInventory))
 }

@@ -1,102 +1,124 @@
-import { fail } from '../errors'
+import { captureObject, fail } from '../errors'
 import { normalizeNostrPubkey } from '../namespace'
 
-export const MIGRATION_PHASES = [
-	'legacy-active',
-	'migration-snapshot-frozen',
-	'importing',
-	'verifying',
-	'coco-ready',
-	'cutover-committed',
-	'legacy-retired',
-] as const
+export type MigrationPhase = 'legacy-active' | 'migration-snapshot-frozen' | 'importing' | 'verifying' | 'coco-ready' | 'cutover-committed'
 
-export type MigrationPhase = (typeof MIGRATION_PHASES)[number]
+export type MonetaryBucketKind =
+	| 'legacy-ready'
+	| 'legacy-inflight'
+	| 'pending-outbound'
+	| 'auction-p2pk-recovery'
+	| 'unresolved'
+	| 'coco-ordinary'
 
-export const MONETARY_BUCKET_KINDS = [
-	'legacy-ready',
-	'legacy-inflight',
-	'pending-outbound',
-	'auction-p2pk-recovery',
-	'unresolved',
-	'coco-ordinary',
-] as const
+export type MonetaryOwner =
+	| 'legacy-ordinary'
+	| 'legacy-recovery-only'
+	| 'migration-coordinator'
+	| 'coco-shadow'
+	| 'coco-migration'
+	| 'coco-canonical'
+	| 'quarantined'
 
-export type MonetaryBucketKind = (typeof MONETARY_BUCKET_KINDS)[number]
+export type MigrationItemState = 'planned' | 'prepared' | 'executing' | 'verified' | 'quarantined'
 
-export const MONETARY_OWNERS = [
-	'legacy-ordinary',
-	'legacy-recovery-only',
-	'migration-coordinator',
-	'coco-shadow',
-	'coco-migration',
-	'coco-canonical',
-	'quarantined',
-] as const
-
-export type MonetaryOwner = (typeof MONETARY_OWNERS)[number]
-
-export type MonetaryCapability =
-	| 'legacy-ordinary-mutation'
-	| 'legacy-recovery-mutation'
-	| 'coco-migration-mutation'
-	| 'coco-ordinary-mutation'
-	| 'shadow-diagnostics'
+export type MigrationQuarantineReason =
+	| 'mint-state-unresolved'
+	| 'source-ownership-mismatch'
+	| 'prepared-operation-ambiguous'
+	| 'accounting-mismatch'
+	| 'malformed-source'
+	| 'coco-collision'
 
 export type Nip60Policy = 'keep-runtime' | 'keep-interop'
 
+declare const canonicalMintBrand: unique symbol
+export type CanonicalMintUrl = string & { readonly [canonicalMintBrand]: true }
+
+declare const bucketKeyBrand: unique symbol
+export type MonetaryBucketKey = string & { readonly [bucketKeyBrand]: true }
+
 export interface MonetaryBucketIdentity {
 	user: string
-	mint: string
+	mint: CanonicalMintUrl
 	unit: string
 	kind: MonetaryBucketKind
 	workflowId?: string
 }
 
-export interface BucketAuthority {
-	bucket: MonetaryBucketIdentity
-	owner: MonetaryOwner
-}
-
-export interface AuthorityVersion {
-	migrationEpoch: string
-	revision: number
-}
-
-export interface WalletAuthoritySnapshot extends AuthorityVersion {
-	walletKey: string
-	phase: MigrationPhase
-	buckets: BucketAuthority[]
-}
-
-export type MigrationItemState = 'planned' | 'prepared' | 'executing' | 'verified' | 'quarantined'
-
-export const MIGRATION_QUARANTINE_REASONS = [
-	'mint-state-unresolved',
-	'source-ownership-mismatch',
-	'prepared-operation-ambiguous',
-	'accounting-mismatch',
-	'malformed-source',
-	'coco-collision',
-] as const
-
-export type MigrationQuarantineReason = (typeof MIGRATION_QUARANTINE_REASONS)[number]
-
-export interface MigrationItemRecord {
-	id: string
-	migrationEpoch: string
-	sourceBucketKey: string
-	user: string
-	mint: string
-	unit: string
-	state: MigrationItemState
-	cocoOperationId?: string
-	revision: number
-	quarantineReason?: MigrationQuarantineReason
-}
-
-const SAFE_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,255}$/
 const UNIT_PATTERN = /^[a-z0-9][a-z0-9._-]{0,31}$/
+const SAFE_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,255}$/
+const BUCKET_KEY_PREFIX = 'g9a-bucket-v1'
+
+export function parseMigrationPhase(value: unknown): MigrationPhase {
+	switch (value) {
+		case 'legacy-active':
+		case 'migration-snapshot-frozen':
+		case 'importing':
+		case 'verifying':
+		case 'coco-ready':
+		case 'cutover-committed':
+			return value
+		default:
+			fail('INVALID_TRANSITION', 'Migration phase is invalid or not executable in I1A')
+	}
+}
+
+export function parseMonetaryBucketKind(value: unknown): MonetaryBucketKind {
+	switch (value) {
+		case 'legacy-ready':
+		case 'legacy-inflight':
+		case 'pending-outbound':
+		case 'auction-p2pk-recovery':
+		case 'unresolved':
+		case 'coco-ordinary':
+			return value
+		default:
+			fail('INVALID_BUCKET_IDENTITY', 'Monetary bucket kind is invalid')
+	}
+}
+
+export function parseMonetaryOwner(value: unknown): MonetaryOwner {
+	switch (value) {
+		case 'legacy-ordinary':
+		case 'legacy-recovery-only':
+		case 'migration-coordinator':
+		case 'coco-shadow':
+		case 'coco-migration':
+		case 'coco-canonical':
+		case 'quarantined':
+			return value
+		default:
+			fail('BUCKET_OWNERSHIP_MISMATCH', 'Monetary owner is invalid')
+	}
+}
+
+export function parseMigrationItemState(value: unknown): MigrationItemState {
+	switch (value) {
+		case 'planned':
+		case 'prepared':
+		case 'executing':
+		case 'verified':
+		case 'quarantined':
+			return value
+		default:
+			fail('INVALID_QUARANTINE_TRANSITION', 'Migration item state is invalid')
+	}
+}
+
+export function parseQuarantineReason(value: unknown): MigrationQuarantineReason {
+	switch (value) {
+		case 'mint-state-unresolved':
+		case 'source-ownership-mismatch':
+		case 'prepared-operation-ambiguous':
+		case 'accounting-mismatch':
+		case 'malformed-source':
+		case 'coco-collision':
+			return value
+		default:
+			fail('INVALID_QUARANTINE_TRANSITION', 'Migration quarantine reason is invalid')
+	}
+}
 
 export function requireSafeId(value: unknown, field: string): string {
 	if (typeof value !== 'string' || !SAFE_ID_PATTERN.test(value)) {
@@ -105,19 +127,27 @@ export function requireSafeId(value: unknown, field: string): string {
 	return value
 }
 
-export function normalizeMintUrl(value: unknown): string {
+function normalizePercentEncoding(pathname: string): string {
+	if (/%(?![0-9a-fA-F]{2})/.test(pathname)) fail('INVALID_BUCKET_IDENTITY', 'Mint URL contains malformed percent encoding')
+	return pathname.replace(/%([0-9a-fA-F]{2})/g, (_match, hex: string) => {
+		const character = String.fromCharCode(Number.parseInt(hex, 16))
+		return /^[A-Za-z0-9._~-]$/.test(character) ? character : `%${hex.toUpperCase()}`
+	})
+}
+
+export function canonicalizeMintUrl(value: unknown): CanonicalMintUrl {
 	if (typeof value !== 'string') fail('INVALID_BUCKET_IDENTITY', 'Mint URL must be a string')
 	let url: URL
 	try {
-		url = new URL(value)
+		url = new URL(value.trim())
 	} catch {
 		fail('INVALID_BUCKET_IDENTITY', 'Mint URL must be valid')
 	}
 	if ((url.protocol !== 'https:' && url.protocol !== 'http:') || url.username || url.password || url.search || url.hash) {
 		fail('INVALID_BUCKET_IDENTITY', 'Mint URL contains unsupported components')
 	}
-	url.pathname = url.pathname.replace(/\/+$/, '') || '/'
-	return url.toString().replace(/\/$/, '')
+	url.pathname = normalizePercentEncoding(url.pathname).replace(/\/+$/, '') || '/'
+	return url.toString().replace(/\/$/, '') as CanonicalMintUrl
 }
 
 export function normalizeUnit(value: unknown): string {
@@ -127,37 +157,77 @@ export function normalizeUnit(value: unknown): string {
 	return normalized
 }
 
-export function createMonetaryBucketIdentity(input: unknown): MonetaryBucketIdentity {
-	if (!input || typeof input !== 'object' || Array.isArray(input)) {
-		fail('INVALID_BUCKET_IDENTITY', 'Monetary bucket identity must be an object')
+function requiresWorkflow(kind: MonetaryBucketKind): boolean {
+	switch (kind) {
+		case 'legacy-inflight':
+		case 'pending-outbound':
+		case 'auction-p2pk-recovery':
+			return true
+		case 'legacy-ready':
+		case 'unresolved':
+		case 'coco-ordinary':
+			return false
 	}
-	const candidate = input as Partial<MonetaryBucketIdentity>
-	if (!MONETARY_BUCKET_KINDS.includes(candidate.kind as MonetaryBucketKind)) {
-		fail('INVALID_BUCKET_IDENTITY', 'Monetary bucket kind is invalid')
-	}
-	const workflowRequired = ['legacy-inflight', 'pending-outbound', 'auction-p2pk-recovery'].includes(candidate.kind as string)
-	const workflowId = candidate.workflowId === undefined ? undefined : requireSafeId(candidate.workflowId, 'workflowId')
-	if (workflowRequired && !workflowId) {
-		fail('INVALID_BUCKET_IDENTITY', 'This monetary bucket requires an explicit workflowId')
-	}
-	if (!workflowRequired && workflowId) {
-		fail('INVALID_BUCKET_IDENTITY', 'This monetary bucket must not include a workflowId')
+}
+
+export function createMonetaryBucketIdentity(input: unknown): Readonly<MonetaryBucketIdentity> {
+	const captured = captureObject(
+		input,
+		['user', 'mint', 'unit', 'kind', 'workflowId'],
+		'INVALID_BUCKET_IDENTITY',
+		'Monetary bucket identity',
+	)
+	const kind = parseMonetaryBucketKind(captured.kind)
+	const workflowId = captured.workflowId === undefined ? undefined : requireSafeId(captured.workflowId, 'workflowId')
+	if (requiresWorkflow(kind) !== Boolean(workflowId)) {
+		fail('INVALID_BUCKET_IDENTITY', requiresWorkflow(kind) ? 'This bucket requires workflowId' : 'This bucket forbids workflowId')
 	}
 	return Object.freeze({
-		user: normalizeNostrPubkey(candidate.user),
-		mint: normalizeMintUrl(candidate.mint),
-		unit: normalizeUnit(candidate.unit),
-		kind: candidate.kind as MonetaryBucketKind,
+		user: normalizeNostrPubkey(captured.user),
+		mint: canonicalizeMintUrl(captured.mint),
+		unit: normalizeUnit(captured.unit),
+		kind,
 		...(workflowId ? { workflowId } : {}),
 	})
 }
 
-export function monetaryBucketKey(input: unknown): string {
-	const bucket = createMonetaryBucketIdentity(input)
-	return [bucket.user, bucket.mint, bucket.unit, bucket.kind, bucket.workflowId ?? '-'].join('|')
+function encodePart(value: string): string {
+	return encodeURIComponent(value)
 }
 
-export function nip60PolicyForPhase(phase: MigrationPhase): Nip60Policy {
-	if (!MIGRATION_PHASES.includes(phase)) fail('INVALID_TRANSITION', 'Migration phase is invalid')
-	return phase === 'cutover-committed' || phase === 'legacy-retired' ? 'keep-interop' : 'keep-runtime'
+function decodePart(value: string): string {
+	try {
+		return decodeURIComponent(value)
+	} catch {
+		fail('INVALID_BUCKET_IDENTITY', 'Monetary bucket key encoding is invalid')
+	}
 }
+
+export function encodeMonetaryBucketIdentity(input: unknown): MonetaryBucketKey {
+	const bucket = createMonetaryBucketIdentity(input)
+	return [
+		BUCKET_KEY_PREFIX,
+		encodePart(bucket.user),
+		encodePart(bucket.mint),
+		encodePart(bucket.unit),
+		encodePart(bucket.kind),
+		encodePart(bucket.workflowId ?? ''),
+	].join('|') as MonetaryBucketKey
+}
+
+export function decodeMonetaryBucketKey(value: unknown): Readonly<MonetaryBucketIdentity> {
+	if (typeof value !== 'string') fail('INVALID_BUCKET_IDENTITY', 'Monetary bucket key must be a string')
+	const parts = value.split('|')
+	if (parts.length !== 6 || parts[0] !== BUCKET_KEY_PREFIX) fail('INVALID_BUCKET_IDENTITY', 'Monetary bucket key is invalid')
+	const bucket = createMonetaryBucketIdentity({
+		user: decodePart(parts[1]),
+		mint: decodePart(parts[2]),
+		unit: decodePart(parts[3]),
+		kind: decodePart(parts[4]),
+		workflowId: decodePart(parts[5]) || undefined,
+	})
+	if (encodeMonetaryBucketIdentity(bucket) !== value) fail('INVALID_BUCKET_IDENTITY', 'Monetary bucket key is not canonical')
+	return bucket
+}
+
+export const monetaryBucketKey = encodeMonetaryBucketIdentity

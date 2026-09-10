@@ -1,5 +1,5 @@
-import { fail } from './errors'
-import { isCocoG9aNamespace } from './namespace'
+import { captureObject, fail } from './errors'
+import { parseCocoWalletNamespace } from './namespace'
 
 export interface CocoShadowStatus {
 	namespace: string
@@ -10,67 +10,80 @@ export interface CocoShadowStatus {
 }
 
 export interface CocoShadowBoundary {
-	status(): Promise<CocoShadowStatus>
+	status(): Promise<Readonly<CocoShadowStatus>>
 	dispose(): Promise<void>
 }
 
 export interface CocoShadowLifecyclePort {
-	readStatus(): Promise<CocoShadowStatus>
+	readStatus(): Promise<unknown>
 	dispose(): Promise<void>
 }
 
-function assertNonNegativeInteger(value: unknown, field: string): asserts value is number {
+function requireCount(value: unknown, field: string): number {
 	if (!Number.isSafeInteger(value) || (value as number) < 0) {
 		fail('SHADOW_BOUNDARY_INVALID', `${field} must be a non-negative safe integer`)
 	}
+	return value as number
 }
 
-function validateStatus(value: unknown): CocoShadowStatus {
-	if (!value || typeof value !== 'object' || Array.isArray(value)) {
-		fail('SHADOW_BOUNDARY_INVALID', 'Shadow status must be an object')
-	}
-	const status = value as Partial<CocoShadowStatus>
-	if (!isCocoG9aNamespace(status.namespace)) {
-		fail('SHADOW_BOUNDARY_INVALID', 'Shadow status contains an invalid namespace')
-	}
-	if (status.authorityGeneration !== null) {
-		assertNonNegativeInteger(status.authorityGeneration, 'authorityGeneration')
-	}
-	assertNonNegativeInteger(status.proofCount, 'proofCount')
-	assertNonNegativeInteger(status.operationCount, 'operationCount')
-	if (status.lifecycle !== 'initialized' && status.lifecycle !== 'disposed') {
+function snapshotStatus(value: unknown): Readonly<CocoShadowStatus> {
+	const captured = captureObject(
+		value,
+		['namespace', 'authorityGeneration', 'proofCount', 'operationCount', 'lifecycle'],
+		'SHADOW_BOUNDARY_INVALID',
+		'Shadow status',
+	)
+	const authorityGeneration =
+		captured.authorityGeneration === null ? null : requireCount(captured.authorityGeneration, 'authorityGeneration')
+	if (captured.lifecycle !== 'initialized' && captured.lifecycle !== 'disposed') {
 		fail('SHADOW_BOUNDARY_INVALID', 'Shadow lifecycle is invalid')
 	}
 	return Object.freeze({
-		namespace: status.namespace,
-		authorityGeneration: status.authorityGeneration,
-		proofCount: status.proofCount,
-		operationCount: status.operationCount,
-		lifecycle: status.lifecycle,
-	}) as CocoShadowStatus
+		namespace: parseCocoWalletNamespace(captured.namespace).namespace,
+		authorityGeneration,
+		proofCount: requireCount(captured.proofCount, 'proofCount'),
+		operationCount: requireCount(captured.operationCount, 'operationCount'),
+		lifecycle: captured.lifecycle,
+	})
 }
 
 export function createCocoShadowBoundary(port: CocoShadowLifecyclePort): CocoShadowBoundary {
-	if (!port || typeof port !== 'object' || typeof port.readStatus !== 'function' || typeof port.dispose !== 'function') {
+	const capturedPort = captureObject(port, ['readStatus', 'dispose'], 'SHADOW_BOUNDARY_INVALID', 'Shadow lifecycle port')
+	if (typeof capturedPort.readStatus !== 'function' || typeof capturedPort.dispose !== 'function') {
 		fail('SHADOW_BOUNDARY_INVALID', 'Shadow lifecycle port is invalid')
 	}
-	let disposed = false
+	const readStatus = capturedPort.readStatus as () => Promise<unknown>
+	const disposePort = capturedPort.dispose as () => Promise<void>
+	let state: 'active' | 'disposing' | 'disposed' = 'active'
 	let disposePromise: Promise<void> | null = null
+
 	return Object.freeze({
-		status: async (): Promise<CocoShadowStatus> => {
-			if (disposed) fail('SHADOW_DISPOSED', 'Coco shadow boundary has been disposed')
-			return validateStatus(await port.readStatus())
+		status: async (): Promise<Readonly<CocoShadowStatus>> => {
+			if (state === 'disposing') fail('SHADOW_DISPOSING', 'Coco shadow boundary is disposing')
+			if (state === 'disposed') fail('SHADOW_DISPOSED', 'Coco shadow boundary has been disposed')
+			let backingStatus: unknown
+			try {
+				backingStatus = await readStatus.call(port)
+			} catch {
+				fail('SHADOW_BOUNDARY_INVALID', 'Shadow status read failed')
+			}
+			return snapshotStatus(backingStatus)
 		},
 		dispose: async (): Promise<void> => {
-			if (disposed) return
+			if (state === 'disposed') return
 			if (!disposePromise) {
-				disposePromise = port
-					.dispose()
+				state = 'disposing'
+				disposePromise = Promise.resolve()
+					.then(() => disposePort.call(port))
 					.then(() => {
-						disposed = true
+						state = 'disposed'
+					})
+					.catch(() => {
+						state = 'active'
+						fail('SHADOW_DISPOSE_FAILED', 'Coco shadow disposal failed')
 					})
 					.finally(() => {
-						if (!disposed) disposePromise = null
+						disposePromise = null
 					})
 			}
 			await disposePromise

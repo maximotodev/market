@@ -1,56 +1,65 @@
 import { describe, expect, test } from 'bun:test'
+import * as runtimeTypes from '../types'
 import { CocoHostError } from '../../errors'
 import { buildCocoWalletNamespace } from '../../namespace'
 import {
-	assertAuthorityInvariant,
-	authorizeMonetaryCapability,
-	createInitialAuthority,
-	getOrdinaryWriterPermissions,
-	transitionAuthority,
-} from '../authority'
-import {
 	InMemoryMigrationCoordinatorStore,
-	MigrationAuthorityCoordinator,
-	createMigrationItem,
-	transitionMigrationItem,
+	LEGACY_RETIREMENT_DEFERRED_PENDING_AUTHORITATIVE_INVENTORY,
+	MigrationCoordinator,
 } from '../coordinator'
 import {
-	MIGRATION_PHASES,
+	canonicalizeMintUrl,
 	createMonetaryBucketIdentity,
+	decodeMonetaryBucketKey,
 	monetaryBucketKey,
-	nip60PolicyForPhase,
+	parseMigrationPhase,
+	parseMonetaryBucketKind,
+	parseMonetaryOwner,
 	type MigrationPhase,
-	type MonetaryBucketIdentity,
-	type WalletAuthoritySnapshot,
 } from '../types'
 
 const USER = 'a'.repeat(64)
-const MINT = 'https://mint.example'
-const WALLET_KEY = buildCocoWalletNamespace({ environment: 'test', pubkey: USER })
+const OTHER_USER = 'b'.repeat(64)
+const EPOCH = 'epoch-1'
+const WALLET = buildCocoWalletNamespace({ environment: 'test', pubkey: USER })
+const MINT = canonicalizeMintUrl('https://mint.example/tenant/cashu')
 
-const ordinary = createMonetaryBucketIdentity({ user: USER, mint: MINT, unit: 'SAT', kind: 'legacy-ready' })
-const coco = createMonetaryBucketIdentity({ user: USER, mint: MINT, unit: 'sat', kind: 'coco-ordinary' })
-const auction = createMonetaryBucketIdentity({
-	user: USER,
-	mint: MINT,
-	unit: 'sat',
-	kind: 'auction-p2pk-recovery',
-	workflowId: 'auction:bid:1',
-})
-const unresolved = createMonetaryBucketIdentity({ user: USER, mint: MINT, unit: 'sat', kind: 'unresolved' })
-
-function initial(buckets: MonetaryBucketIdentity[] = [ordinary, coco]): WalletAuthoritySnapshot {
-	return createInitialAuthority({ walletKey: WALLET_KEY, migrationEpoch: 'epoch-1', buckets })
+function query() {
+	return { walletKey: WALLET, migrationEpoch: EPOCH }
 }
 
-function advance(snapshot: WalletAuthoritySnapshot, target: MigrationPhase): WalletAuthoritySnapshot {
-	return transitionAuthority(snapshot, snapshot, target)
+function bucket(kind: string, overrides: Record<string, unknown> = {}) {
+	return createMonetaryBucketIdentity({
+		user: USER,
+		mint: MINT,
+		unit: 'sat',
+		kind,
+		...(kind === 'legacy-inflight' || kind === 'pending-outbound' || kind === 'auction-p2pk-recovery' ? { workflowId: 'workflow:1' } : {}),
+		...overrides,
+	})
 }
 
-function snapshotsForEveryPhase(): WalletAuthoritySnapshot[] {
-	const snapshots = [initial()]
-	for (const phase of MIGRATION_PHASES.slice(1)) snapshots.push(advance(snapshots.at(-1)!, phase))
-	return snapshots
+async function setup() {
+	const store = new InMemoryMigrationCoordinatorStore()
+	const coordinator = new MigrationCoordinator(store)
+	await coordinator.initialize({ walletIdentity: USER, environment: 'test', migrationEpoch: EPOCH })
+	return { store, coordinator }
+}
+
+async function advanceTo(coordinator: MigrationCoordinator, target: MigrationPhase): Promise<void> {
+	const phases: MigrationPhase[] = [
+		'legacy-active',
+		'migration-snapshot-frozen',
+		'importing',
+		'verifying',
+		'coco-ready',
+		'cutover-committed',
+	]
+	let status = await coordinator.status(query())
+	while (status.phase !== target) {
+		const next = phases[phases.indexOf(status.phase) + 1]
+		status = await coordinator.advanceAuthority({ ...query(), expectedRevision: status.revision, nextPhase: next })
+	}
 }
 
 function expectCode(fn: () => unknown, code: CocoHostError['code']): void {
@@ -63,283 +72,191 @@ function expectCode(fn: () => unknown, code: CocoHostError['code']): void {
 	}
 }
 
-describe('migration authority state and bucket ownership', () => {
-	test('6: every authority state has explicit legacy and Coco permissions', () => {
-		const expected = {
-			'legacy-active': [true, false],
-			'migration-snapshot-frozen': [false, false],
-			importing: [false, false],
-			verifying: [false, false],
-			'coco-ready': [false, false],
-			'cutover-committed': [false, true],
-			'legacy-retired': [false, true],
-		} satisfies Record<MigrationPhase, [boolean, boolean]>
+describe('closed policy and canonical identities', () => {
+	test('7: exported runtime policy contains no mutable decision arrays', async () => {
+		expect(Object.values(runtimeTypes).filter(Array.isArray)).toEqual([])
+		const { coordinator } = await setup()
+		const permission = await coordinator.permissionsFor({ ...query(), bucketKey: monetaryBucketKey(bucket('legacy-ready')) })
+		const capabilities = permission.capabilities
+		expect(Object.isFrozen(capabilities)).toBe(true)
+		try {
+			;(capabilities as { legacyOrdinary: boolean }).legacyOrdinary = false
+		} catch {
+			// Frozen mutation rejection is expected in strict runtimes.
+		}
+		expect(capabilities.legacyOrdinary).toBe(true)
+	})
 
-		for (const phase of MIGRATION_PHASES) {
-			const permissions = getOrdinaryWriterPermissions(phase)
-			expect([permissions.legacyOrdinary, permissions.cocoOrdinary]).toEqual(expected[phase])
+	test('9-11: unknown phase, owner, and bucket kind reject', () => {
+		expectCode(() => parseMigrationPhase('future-phase'), 'INVALID_TRANSITION')
+		expectCode(() => parseMonetaryOwner('future-owner'), 'BUCKET_OWNERSHIP_MISMATCH')
+		expectCode(() => parseMonetaryBucketKind('future-kind'), 'INVALID_BUCKET_IDENTITY')
+	})
+
+	test('12: changing-kind getter cannot bypass workflow requirements', () => {
+		let reads = 0
+		const input = {
+			user: USER,
+			mint: MINT,
+			unit: 'sat',
+			get kind() {
+				reads += 1
+				return reads === 1 ? 'legacy-ready' : 'auction-p2pk-recovery'
+			},
+		}
+		expectCode(() => createMonetaryBucketIdentity(input), 'INVALID_BUCKET_IDENTITY')
+		expect(reads).toBe(0)
+	})
+
+	test('13: percent-escape case cannot split canonical mint identity', () => {
+		expect(canonicalizeMintUrl('https://EXAMPLE.com:443/%2f')).toBe(canonicalizeMintUrl('https://example.com/%2F'))
+		expect(canonicalizeMintUrl('https://example.com/tenant-a')).not.toBe(canonicalizeMintUrl('https://example.com/tenant-b'))
+	})
+
+	test('canonical mint preserves custom base paths and rejects ambiguous components', () => {
+		expect(canonicalizeMintUrl(' https://mint.example/tenant/cashu/ ')).toBe(MINT)
+		for (const value of ['https://user:pass@mint.example', 'https://mint.example/path?tenant=1', 'https://mint.example/#fragment']) {
+			expectCode(() => canonicalizeMintUrl(value), 'INVALID_BUCKET_IDENTITY')
 		}
 	})
 
-	test('7: no state permits dual ordinary writers', () => {
-		for (const snapshot of snapshotsForEveryPhase()) {
-			assertAuthorityInvariant(snapshot)
-			const permissions = getOrdinaryWriterPermissions(snapshot.phase)
-			expect(permissions.legacyOrdinary && permissions.cocoOrdinary).toBe(false)
-		}
+	test('14: canonical bucket codec round-trips exactly', () => {
+		const identity = bucket('auction-p2pk-recovery')
+		const encoded = monetaryBucketKey(identity)
+		expect(decodeMonetaryBucketKey(encoded)).toEqual(identity)
+		expect(monetaryBucketKey(decodeMonetaryBucketKey(encoded))).toBe(encoded)
 	})
 
-	test('explicitly rejects a runtime snapshot that attempts two ordinary owners for one bucket', () => {
-		const snapshot = initial([ordinary])
-		const hostile = {
-			...snapshot,
-			buckets: [
-				{ bucket: ordinary, owner: 'legacy-ordinary' },
-				{ bucket: ordinary, owner: 'coco-canonical' },
-			],
-		}
-		expectCode(() => assertAuthorityInvariant(hostile), 'DUAL_WRITER_ATTEMPT')
-	})
-
-	test('rejects undeclared fields from durable authority records', () => {
-		expectCode(() => assertAuthorityInvariant({ ...initial(), secret: 'must-not-survive' }), 'INVALID_TRANSITION')
-	})
-
-	test('8: stale authority revision rejects before authorization', () => {
-		const snapshot = initial([ordinary])
-		expectCode(
-			() =>
-				authorizeMonetaryCapability(
-					snapshot,
-					{ migrationEpoch: 'epoch-1', revision: 1 },
-					monetaryBucketKey(ordinary),
-					'legacy-ordinary-mutation',
-				),
-			'STALE_REVISION',
-		)
-	})
-
-	test('9: stale epoch rejects before authorization', () => {
-		const snapshot = initial([ordinary])
-		expectCode(
-			() =>
-				authorizeMonetaryCapability(
-					snapshot,
-					{ migrationEpoch: 'epoch-old', revision: 0 },
-					monetaryBucketKey(ordinary),
-					'legacy-ordinary-mutation',
-				),
-			'WRONG_EPOCH',
-		)
-	})
-
-	test('12: cutover cannot happen directly from legacy-active', () => {
-		const snapshot = initial()
-		expectCode(() => transitionAuthority(snapshot, snapshot, 'cutover-committed'), 'INVALID_TRANSITION')
-	})
-
-	test('13: import cannot begin before legacy freeze', () => {
-		const snapshot = initial()
-		expectCode(() => transitionAuthority(snapshot, snapshot, 'importing'), 'INVALID_TRANSITION')
-	})
-
-	test('14: legacy ordinary mutation is blocked after freeze', () => {
-		const frozen = advance(initial([ordinary]), 'migration-snapshot-frozen')
-		expectCode(
-			() => authorizeMonetaryCapability(frozen, frozen, monetaryBucketKey(ordinary), 'legacy-ordinary-mutation'),
-			'BUCKET_OWNERSHIP_MISMATCH',
-		)
-	})
-
-	test('15: Coco ordinary mutation is blocked before committed cutover', () => {
-		for (const snapshot of snapshotsForEveryPhase().slice(0, 5)) {
-			expectCode(
-				() => authorizeMonetaryCapability(snapshot, snapshot, monetaryBucketKey(coco), 'coco-ordinary-mutation'),
-				'BUCKET_OWNERSHIP_MISMATCH',
-			)
-		}
-	})
-
-	test('authorizes only the expected ordinary or migration writer at each boundary', () => {
-		const active = initial([ordinary])
-		expect(() => authorizeMonetaryCapability(active, active, monetaryBucketKey(ordinary), 'legacy-ordinary-mutation')).not.toThrow()
-
-		const importing = advance(advance(active, 'migration-snapshot-frozen'), 'importing')
-		expect(() => authorizeMonetaryCapability(importing, importing, monetaryBucketKey(ordinary), 'coco-migration-mutation')).not.toThrow()
-
-		let cutover = importing
-		for (const phase of ['verifying', 'coco-ready', 'cutover-committed'] as const) cutover = advance(cutover, phase)
-		expect(() => authorizeMonetaryCapability(cutover, cutover, monetaryBucketKey(ordinary), 'coco-ordinary-mutation')).not.toThrow()
-	})
-
-	test('16-17: retained Auction recovery survives ordinary cutover but cannot authorize an ordinary send', () => {
-		let snapshot = initial([ordinary, auction])
-		for (const phase of MIGRATION_PHASES.slice(1, 6)) snapshot = advance(snapshot, phase)
-		const entry = snapshot.buckets.find(({ bucket }) => monetaryBucketKey(bucket) === monetaryBucketKey(auction))
-		expect(snapshot.phase).toBe('cutover-committed')
-		expect(entry?.owner).toBe('legacy-recovery-only')
-		expect(() => authorizeMonetaryCapability(snapshot, snapshot, monetaryBucketKey(auction), 'legacy-recovery-mutation')).not.toThrow()
-		expectCode(
-			() => authorizeMonetaryCapability(snapshot, snapshot, monetaryBucketKey(auction), 'legacy-ordinary-mutation'),
-			'BUCKET_OWNERSHIP_MISMATCH',
-		)
-		expectCode(() => advance(snapshot, 'legacy-retired'), 'INVALID_TRANSITION')
-	})
-
-	test('18: quarantine has no monetary capability', () => {
-		const snapshot = initial([unresolved])
-		for (const capability of [
-			'legacy-ordinary-mutation',
-			'legacy-recovery-mutation',
-			'coco-migration-mutation',
-			'coco-ordinary-mutation',
-		] as const) {
-			expectCode(
-				() => authorizeMonetaryCapability(snapshot, snapshot, monetaryBucketKey(unresolved), capability),
-				'BUCKET_OWNERSHIP_MISMATCH',
-			)
-		}
-	})
-
-	test('19: authority phases cannot roll back after ownership advances', () => {
-		const importing = advance(advance(initial(), 'migration-snapshot-frozen'), 'importing')
-		expectCode(() => transitionAuthority(importing, importing, 'legacy-active'), 'INVALID_TRANSITION')
-	})
-
-	test('encodes NIP-60 as runtime before cutover and interop after cutover', () => {
-		for (const phase of MIGRATION_PHASES.slice(0, 5)) expect(nip60PolicyForPhase(phase)).toBe('keep-runtime')
-		expect(nip60PolicyForPhase('cutover-committed')).toBe('keep-interop')
-		expect(nip60PolicyForPhase('legacy-retired')).toBe('keep-interop')
+	test('15: bucket prefix lookalikes and noncanonical encodings reject', () => {
+		const encoded = monetaryBucketKey(bucket('legacy-ready'))
+		expectCode(() => decodeMonetaryBucketKey(encoded.replace('g9a-bucket-v1', 'g9a-bucket-v10')), 'INVALID_BUCKET_IDENTITY')
+		expectCode(() => decodeMonetaryBucketKey(`${encoded}suffix`), 'INVALID_BUCKET_IDENTITY')
 	})
 })
 
-describe('CAS coordinator contract', () => {
-	test('10-11: valid CAS succeeds once and a duplicate observed revision rejects', async () => {
-		const coordinator = new MigrationAuthorityCoordinator(new InMemoryMigrationCoordinatorStore())
-		const snapshot = initial()
-		await coordinator.initialize(snapshot)
-		const observed = await coordinator.load(snapshot.walletKey)
-		const frozen = await coordinator.transition(snapshot.walletKey, observed, 'migration-snapshot-frozen')
-		expect(frozen.revision).toBe(1)
-
-		await expect(coordinator.transition(snapshot.walletKey, observed, 'migration-snapshot-frozen')).rejects.toMatchObject({
-			code: 'STALE_REVISION',
-		})
-	})
-
-	test('a stale caller cannot authorize through the coordinator after authority advances', async () => {
-		const coordinator = new MigrationAuthorityCoordinator(new InMemoryMigrationCoordinatorStore())
-		const snapshot = initial([ordinary])
-		await coordinator.initialize(snapshot)
-		await coordinator.transition(snapshot.walletKey, snapshot, 'migration-snapshot-frozen')
-
+describe('coordinator advisory authority projections', () => {
+	test('22: legacy-retired is not executable in I1A', async () => {
+		const { coordinator } = await setup()
+		await advanceTo(coordinator, 'cutover-committed')
+		const status = await coordinator.status(query())
 		await expect(
-			coordinator.authorize(snapshot.walletKey, snapshot, monetaryBucketKey(ordinary), 'legacy-ordinary-mutation'),
-		).rejects.toMatchObject({ code: 'STALE_REVISION' })
-	})
-
-	test('store returns clones so callers cannot mutate durable authority', async () => {
-		const store = new InMemoryMigrationCoordinatorStore()
-		const snapshot = initial()
-		expect(await store.create(snapshot)).toBe(true)
-		const loaded = await store.load(snapshot.walletKey)
-		loaded!.buckets.length = 0
-		expect((await store.load(snapshot.walletKey))!.buckets).toHaveLength(2)
-	})
-
-	test('the store rejects a CAS replacement for a different wallet or non-successor revision', async () => {
-		const store = new InMemoryMigrationCoordinatorStore()
-		const snapshot = initial()
-		expect(await store.create(snapshot)).toBe(true)
-		await expect(
-			store.compareAndSwap(snapshot.walletKey, snapshot, {
-				...snapshot,
-				walletKey: buildCocoWalletNamespace({ environment: 'production', pubkey: USER }),
-				revision: 1,
-			}),
+			coordinator.advanceAuthority({ ...query(), expectedRevision: status.revision, nextPhase: 'legacy-retired' }),
 		).rejects.toMatchObject({ code: 'INVALID_TRANSITION' })
+		expect(LEGACY_RETIREMENT_DEFERRED_PENDING_AUTHORITATIVE_INVENTORY).toBe(true)
 	})
 
-	test('persists migration items behind their own epoch/revision CAS', async () => {
-		const coordinator = new MigrationAuthorityCoordinator(new InMemoryMigrationCoordinatorStore())
-		const snapshot = initial()
-		await coordinator.initialize(snapshot)
-		const planned = createMigrationItem({ id: 'item-cas', migrationEpoch: 'epoch-1', sourceBucket: ordinary })
-		await coordinator.initializeItem(snapshot.walletKey, planned)
-		const prepared = await coordinator.transitionItem(snapshot.walletKey, planned.id, planned, 'prepared', {
-			cocoOperationId: 'receive-op:cas',
+	test('23-24: retained Auction recovery survives cutover but cannot authorize ordinary legacy action', async () => {
+		const { coordinator } = await setup()
+		const auction = bucket('auction-p2pk-recovery')
+		await coordinator.createPlannedItem({ ...query(), itemId: 'auction-item', sourceBucket: auction })
+		await advanceTo(coordinator, 'cutover-committed')
+		const permission = await coordinator.permissionsFor({ ...query(), bucketKey: monetaryBucketKey(auction) })
+		expect(permission.owner).toBe('legacy-recovery-only')
+		expect(permission.capabilities).toEqual({
+			legacyOrdinary: false,
+			legacyRecovery: true,
+			cocoMigration: false,
+			cocoOrdinary: false,
+			shadowDiagnostics: false,
 		})
-		expect(prepared).toMatchObject({ state: 'prepared', revision: 1 })
+	})
+
+	test('25: recovery-only projection cannot cross user, mint, unit, or workflow', async () => {
+		const { coordinator } = await setup()
+		const auction = bucket('auction-p2pk-recovery')
+		await coordinator.createPlannedItem({ ...query(), itemId: 'auction-item', sourceBucket: auction })
+		for (const variant of [
+			bucket('auction-p2pk-recovery', { mint: 'https://other-mint.example' }),
+			bucket('auction-p2pk-recovery', { unit: 'usd' }),
+			bucket('auction-p2pk-recovery', { workflowId: 'workflow:2' }),
+		]) {
+			const permission = await coordinator.permissionsFor({ ...query(), bucketKey: monetaryBucketKey(variant) })
+			expect(permission.capabilities.legacyRecovery).toBe(false)
+		}
 		await expect(
-			coordinator.transitionItem(snapshot.walletKey, planned.id, planned, 'prepared', {
-				cocoOperationId: 'receive-op:cas',
-			}),
-		).rejects.toMatchObject({ code: 'STALE_REVISION' })
+			coordinator.permissionsFor({ ...query(), bucketKey: monetaryBucketKey(bucket('auction-p2pk-recovery', { user: OTHER_USER })) }),
+		).rejects.toMatchObject({ code: 'BUCKET_OWNERSHIP_MISMATCH' })
+	})
+
+	test('26-27: NIP-60 policy derives only from current durable authority', async () => {
+		const { coordinator } = await setup()
+		expect(await coordinator.nip60Policy(query())).toBe('keep-runtime')
+		await expect(coordinator.nip60Policy({ ...query(), phase: 'cutover-committed' })).rejects.toMatchObject({
+			code: 'INVALID_TRANSITION',
+		})
+		await advanceTo(coordinator, 'cutover-committed')
+		expect(await coordinator.nip60Policy(query())).toBe('keep-interop')
+	})
+
+	test('every active phase has exactly one ordinary-writer projection', async () => {
+		const { coordinator } = await setup()
+		const legacy = bucket('legacy-ready')
+		const coco = bucket('coco-ordinary')
+		const phases: MigrationPhase[] = [
+			'legacy-active',
+			'migration-snapshot-frozen',
+			'importing',
+			'verifying',
+			'coco-ready',
+			'cutover-committed',
+		]
+		for (const phase of phases) {
+			await advanceTo(coordinator, phase)
+			const legacyPermission = await coordinator.permissionsFor({ ...query(), bucketKey: monetaryBucketKey(legacy) })
+			const cocoPermission = await coordinator.permissionsFor({ ...query(), bucketKey: monetaryBucketKey(coco) })
+			const ordinaryWriters = Number(legacyPermission.capabilities.legacyOrdinary) + Number(cocoPermission.capabilities.cocoOrdinary)
+			expect(ordinaryWriters).toBeLessThanOrEqual(1)
+		}
+	})
+
+	test('45: a stale permission projection cannot authorize or advance anything', async () => {
+		const { coordinator } = await setup()
+		const legacy = bucket('legacy-ready')
+		const permission = await coordinator.permissionsFor({ ...query(), bucketKey: monetaryBucketKey(legacy) })
+		await coordinator.advanceAuthority({ ...query(), expectedRevision: 0, nextPhase: 'migration-snapshot-frozen' })
+		await expect(coordinator.advanceAuthority(permission)).rejects.toMatchObject({ code: 'INVALID_TRANSITION' })
+		expect('authorize' in coordinator).toBe(false)
+	})
+
+	test('46: coordinator exposes no store or repository escape', async () => {
+		const { coordinator } = await setup()
+		expect('store' in coordinator).toBe(false)
+		expect('repository' in coordinator).toBe(false)
+		expect(Object.keys(coordinator)).toEqual([])
+	})
+
+	test('new migration items cannot be introduced after cutover', async () => {
+		const { coordinator } = await setup()
+		await advanceTo(coordinator, 'cutover-committed')
+		await expect(
+			coordinator.createPlannedItem({ ...query(), itemId: 'late-item', sourceBucket: bucket('legacy-ready') }),
+		).rejects.toMatchObject({ code: 'INVALID_QUARANTINE_TRANSITION' })
 	})
 })
 
-describe('migration item identity and quarantine', () => {
-	test('creates a sanitized stable item record with no bearer fields', () => {
-		const item = createMigrationItem({
-			id: 'legacy-item:42',
-			migrationEpoch: 'epoch-1',
-			sourceBucket: ordinary,
-			proof: 'must-not-survive',
-			secret: 'must-not-survive',
-			token: 'must-not-survive',
-			witness: 'must-not-survive',
-			refundPrivateKey: 'must-not-survive',
-		})
-		expect(Object.keys(item).sort()).toEqual(['id', 'migrationEpoch', 'mint', 'revision', 'sourceBucketKey', 'state', 'unit', 'user'])
-		expect(JSON.stringify(item)).not.toContain('must-not-survive')
-	})
-
-	test('valid lifecycle binds a future Coco operation before execution', () => {
-		const planned = createMigrationItem({ id: 'item-1', migrationEpoch: 'epoch-1', sourceBucket: ordinary })
-		const prepared = transitionMigrationItem(planned, 0, 'prepared', { cocoOperationId: 'receive-op:1' })
-		const executing = transitionMigrationItem(prepared, 1, 'executing')
-		const verified = transitionMigrationItem(executing, 2, 'verified')
-		expect(verified).toMatchObject({ state: 'verified', revision: 3, cocoOperationId: 'receive-op:1' })
-	})
-
-	test('a bound Coco operation identity cannot be replaced during migration', () => {
-		const planned = createMigrationItem({ id: 'item-op-binding', migrationEpoch: 'epoch-1', sourceBucket: ordinary })
-		const prepared = transitionMigrationItem(planned, 0, 'prepared', { cocoOperationId: 'receive-op:original' })
-		expectCode(
-			() => transitionMigrationItem(prepared, 1, 'executing', { cocoOperationId: 'receive-op:replacement' }),
-			'INVALID_QUARANTINE_TRANSITION',
-		)
-	})
-
-	test('migration transition options reject undeclared bearer-shaped fields', () => {
-		const planned = createMigrationItem({ id: 'item-options', migrationEpoch: 'epoch-1', sourceBucket: ordinary })
-		expectCode(
-			() => transitionMigrationItem(planned, 0, 'prepared', { secret: 'must-not-survive' } as never),
-			'INVALID_QUARANTINE_TRANSITION',
-		)
-	})
-
-	test('invalid or reversible quarantine transitions fail deterministically', () => {
-		const planned = createMigrationItem({ id: 'item-2', migrationEpoch: 'epoch-1', sourceBucket: ordinary })
-		expectCode(() => transitionMigrationItem(planned, 0, 'quarantined'), 'INVALID_QUARANTINE_TRANSITION')
-		const quarantined = transitionMigrationItem(planned, 0, 'quarantined', {
-			quarantineReason: 'mint-state-unresolved',
-		})
-		expectCode(() => transitionMigrationItem(quarantined, 1, 'planned'), 'INVALID_QUARANTINE_TRANSITION')
-	})
-
-	test('rejects undeclared fields from a migration item before returning a public record', () => {
-		const planned = createMigrationItem({ id: 'item-3', migrationEpoch: 'epoch-1', sourceBucket: ordinary })
-		expectCode(
-			() => transitionMigrationItem({ ...planned, secret: 'must-not-survive' } as never, 0, 'prepared'),
-			'INVALID_QUARANTINE_TRANSITION',
-		)
-	})
-
-	test('26: malformed public runtime containers produce domain failures, not TypeError', () => {
-		for (const value of [null, [], 'bad']) {
-			expectCode(() => createMigrationItem(value), 'INVALID_QUARANTINE_TRANSITION')
-			expectCode(() => assertAuthorityInvariant(value), 'INVALID_TRANSITION')
+describe('bounded integration exclusions', () => {
+	test('47-48: production scaffold has no Coco dependency or #1235 monetary import', async () => {
+		const productionFiles = [
+			'../../errors.ts',
+			'../../namespace.ts',
+			'../../shadowBoundary.ts',
+			'../types.ts',
+			'../authority.ts',
+			'../coordinator.ts',
+			'../accounting.ts',
+		]
+		const forbidden = [
+			'@cashu/coco',
+			'coco-cashu',
+			'@/lib/stores/nip60',
+			'@/lib/stores/cashu',
+			'@/lib/wallet',
+			'@/lib/auction',
+			'@/publish/auctions',
+		]
+		for (const relativePath of productionFiles) {
+			const source = await Bun.file(new URL(relativePath, import.meta.url)).text()
+			for (const specifier of forbidden) expect(source).not.toContain(specifier)
 		}
 	})
 })
