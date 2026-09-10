@@ -8,6 +8,8 @@ import {
 	MigrationCoordinator,
 } from '../coordinator'
 import {
+	MAX_MINT_URL_UTF8_BYTES,
+	REJECTED_MINT_MIGRATION_INPUT_POLICY,
 	canonicalizeMintUrl,
 	createMonetaryBucketIdentity,
 	decodeMonetaryBucketKey,
@@ -23,6 +25,28 @@ const OTHER_USER = 'b'.repeat(64)
 const EPOCH = 'epoch-1'
 const WALLET = buildCocoWalletNamespace({ environment: 'test', pubkey: USER })
 const MINT = canonicalizeMintUrl('https://mint.example/tenant/cashu')
+const UTF8_ENCODER = new TextEncoder()
+
+function utf8Bytes(value: string): number {
+	return UTF8_ENCODER.encode(value).byteLength
+}
+
+function asciiMintWithBytes(bytes: number): string {
+	const prefix = 'https://example.com/'
+	return `${prefix}${'a'.repeat(bytes - utf8Bytes(prefix))}`
+}
+
+// Exact test-only reference for maximotodev/coco f8069dc packages/core/utils.ts normalizeMintUrl().
+function pinnedCocoNormalize(mintUrl: string): string {
+	const url = new URL(mintUrl)
+	if ((url.protocol === 'https:' && url.port === '443') || (url.protocol === 'http:' && url.port === '80')) {
+		url.port = ''
+	}
+	let normalized = `${url.protocol}//${url.host}${url.pathname}`
+	if (normalized.endsWith('/') && url.pathname !== '/') normalized = normalized.slice(0, -1)
+	else if (url.pathname === '/') normalized = `${url.protocol}//${url.host}`
+	return normalized
+}
 
 function query() {
 	return { walletKey: WALLET, migrationEpoch: EPOCH }
@@ -111,6 +135,103 @@ describe('closed policy and canonical identities', () => {
 	test('13: percent-escape case cannot split canonical mint identity', () => {
 		expect(canonicalizeMintUrl('https://EXAMPLE.com:443/%2f')).toBe(canonicalizeMintUrl('https://example.com/%2F'))
 		expect(canonicalizeMintUrl('https://example.com/tenant-a')).not.toBe(canonicalizeMintUrl('https://example.com/tenant-b'))
+	})
+
+	test('mint roots and one trailing slash normalize without merging multiple trailing separators', () => {
+		expect(canonicalizeMintUrl('https://example.com')).toBe('https://example.com')
+		expect(canonicalizeMintUrl('https://example.com/')).toBe('https://example.com')
+		expect(canonicalizeMintUrl('https://example.com/a')).toBe('https://example.com/a')
+		expect(canonicalizeMintUrl('https://example.com/a/')).toBe('https://example.com/a')
+		for (const ambiguous of ['https://example.com//', 'https://example.com///', 'https://example.com/a//', 'https://example.com/a///']) {
+			expectCode(() => canonicalizeMintUrl(ambiguous), 'INVALID_BUCKET_IDENTITY')
+		}
+	})
+
+	test('safe URL representation aliases normalize while path distinctions remain intact', () => {
+		expect(canonicalizeMintUrl('https://EXAMPLE.com:443/a/../b')).toBe('https://example.com/b')
+		expect(canonicalizeMintUrl('http://EXAMPLE.com:80/a')).toBe('http://example.com/a')
+		expect(canonicalizeMintUrl('https://example.com/a//b')).toBe('https://example.com/a//b')
+		expect(canonicalizeMintUrl('https://example.com/%2f')).toBe('https://example.com/%2F')
+		expect(canonicalizeMintUrl('https://example.com/%2F')).toBe('https://example.com/%2F')
+		expect(canonicalizeMintUrl('https://example.com/%2F')).not.toBe(canonicalizeMintUrl('https://example.com//a'))
+	})
+
+	test('unsupported URL components and schemes remain rejected', () => {
+		for (const value of [
+			'https://user:pass@example.com/a',
+			'https://@example.com/a',
+			'https://example.com/a?tenant=1',
+			'https://example.com/a?',
+			'https://example.com/a#fragment',
+			'https://example.com/a#',
+			'ftp://example.com/a',
+			'file:///tmp/mint',
+		]) {
+			expectCode(() => canonicalizeMintUrl(value), 'INVALID_BUCKET_IDENTITY')
+		}
+	})
+
+	test('every accepted canonical mint is a fixed point under pinned Coco f8069dc normalization', () => {
+		const accepted = [
+			'https://example.com',
+			'https://example.com/',
+			'https://example.com/a',
+			'https://example.com/a/',
+			'https://EXAMPLE.com:443/a/../b',
+			'http://EXAMPLE.com:80/a',
+			'https://example.com/%2f',
+			'https://example.com/%7euser',
+			'https://example.com/a//b',
+		]
+		for (const raw of accepted) {
+			const canonical = canonicalizeMintUrl(raw)
+			expect(pinnedCocoNormalize(canonical)).toBe(canonical)
+		}
+	})
+
+	test('mint URL ceiling accepts exactly 4096 UTF-8 bytes and rejects 4097', () => {
+		const exact = asciiMintWithBytes(MAX_MINT_URL_UTF8_BYTES)
+		const oversized = asciiMintWithBytes(MAX_MINT_URL_UTF8_BYTES + 1)
+		expect(utf8Bytes(exact)).toBe(MAX_MINT_URL_UTF8_BYTES)
+		expect(canonicalizeMintUrl(exact)).toBe(exact)
+		expect(utf8Bytes(oversized)).toBe(MAX_MINT_URL_UTF8_BYTES + 1)
+		expectCode(() => canonicalizeMintUrl(oversized), 'INVALID_BUCKET_IDENTITY')
+	})
+
+	test('mint URL ceiling measures raw and canonical UTF-8 bytes', () => {
+		const multibyteOversized = `https://example.com/${'é'.repeat(2040)}`
+		expect(multibyteOversized.length).toBeLessThan(MAX_MINT_URL_UTF8_BYTES)
+		expect(utf8Bytes(multibyteOversized)).toBeGreaterThan(MAX_MINT_URL_UTF8_BYTES)
+		expectCode(() => canonicalizeMintUrl(multibyteOversized), 'INVALID_BUCKET_IDENTITY')
+
+		const canonicalExpansion = `https://example.com/${'é'.repeat(1000)}`
+		expect(utf8Bytes(canonicalExpansion)).toBeLessThan(MAX_MINT_URL_UTF8_BYTES)
+		expectCode(() => canonicalizeMintUrl(canonicalExpansion), 'INVALID_BUCKET_IDENTITY')
+
+		const prefix = 'https://example.com/'
+		const available = MAX_MINT_URL_UTF8_BYTES - utf8Bytes(prefix)
+		const escapes = '%2f'.repeat(Math.floor(available / 3))
+		const encoded = `${prefix}${escapes}${'a'.repeat(available - utf8Bytes(escapes))}`
+		expect(utf8Bytes(encoded)).toBe(MAX_MINT_URL_UTF8_BYTES)
+		expect(canonicalizeMintUrl(encoded)).toBe(encoded.replaceAll('%2f', '%2F'))
+	})
+
+	test('ambiguous mint representations cannot construct canonical monetary buckets', () => {
+		const sourceBucket = { user: USER, mint: 'https://example.com/a//', unit: 'sat', kind: 'legacy-ready' }
+		expectCode(() => createMonetaryBucketIdentity(sourceBucket), 'INVALID_BUCKET_IDENTITY')
+		expectCode(() => monetaryBucketKey(sourceBucket), 'INVALID_BUCKET_IDENTITY')
+	})
+
+	test('rejected mint representations remain unresolved migration inputs', () => {
+		expect(REJECTED_MINT_MIGRATION_INPUT_POLICY).toEqual({
+			classification: 'UNRESOLVED_QUARANTINED_MIGRATION_INPUT',
+			silentlyRewrite: false,
+			silentlyDrop: false,
+			importIntoCoco: false,
+			contributesToCocoReadyValue: false,
+			authorizesCutover: false,
+		})
+		expect(Object.isFrozen(REJECTED_MINT_MIGRATION_INPUT_POLICY)).toBe(true)
 	})
 
 	test('canonical mint preserves custom base paths and rejects ambiguous components', () => {
@@ -231,6 +352,23 @@ describe('coordinator advisory authority projections', () => {
 		await expect(
 			coordinator.createPlannedItem({ ...query(), itemId: 'late-item', sourceBucket: bucket('legacy-ready') }),
 		).rejects.toMatchObject({ code: 'INVALID_QUARANTINE_TRANSITION' })
+	})
+
+	test('oversized mint input fails before a migration item is persisted', async () => {
+		const { coordinator } = await setup()
+		await expect(
+			coordinator.createPlannedItem({
+				...query(),
+				itemId: 'oversized-mint',
+				sourceBucket: {
+					user: USER,
+					mint: asciiMintWithBytes(MAX_MINT_URL_UTF8_BYTES + 1),
+					unit: 'sat',
+					kind: 'legacy-ready',
+				},
+			}),
+		).rejects.toMatchObject({ code: 'INVALID_BUCKET_IDENTITY' })
+		expect(await coordinator.items(query())).toEqual([])
 	})
 })
 

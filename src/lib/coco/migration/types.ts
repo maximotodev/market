@@ -50,6 +50,16 @@ const UNIT_PATTERN = /^[a-z0-9][a-z0-9._-]{0,31}$/
 const SAFE_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,255}$/
 const BUCKET_KEY_PREFIX = 'g9a-bucket-v1'
 
+export const MAX_MINT_URL_UTF8_BYTES = 4096
+export const REJECTED_MINT_MIGRATION_INPUT_POLICY = Object.freeze({
+	classification: 'UNRESOLVED_QUARANTINED_MIGRATION_INPUT',
+	silentlyRewrite: false,
+	silentlyDrop: false,
+	importIntoCoco: false,
+	contributesToCocoReadyValue: false,
+	authorizesCutover: false,
+} as const)
+
 export function parseMigrationPhase(value: unknown): MigrationPhase {
 	switch (value) {
 		case 'legacy-active':
@@ -135,19 +145,46 @@ function normalizePercentEncoding(pathname: string): string {
 	})
 }
 
+function assertBoundedMintUrl(value: string): void {
+	let bytes = 0
+	for (const character of value) {
+		const codePoint = character.codePointAt(0)!
+		bytes += codePoint <= 0x7f ? 1 : codePoint <= 0x7ff ? 2 : codePoint <= 0xffff ? 3 : 4
+		if (bytes > MAX_MINT_URL_UTF8_BYTES) {
+			fail('INVALID_BUCKET_IDENTITY', 'Mint URL exceeds the migration identity resource ceiling')
+		}
+	}
+}
+
 export function canonicalizeMintUrl(value: unknown): CanonicalMintUrl {
 	if (typeof value !== 'string') fail('INVALID_BUCKET_IDENTITY', 'Mint URL must be a string')
+	assertBoundedMintUrl(value)
+	const candidate = value.trim()
 	let url: URL
 	try {
-		url = new URL(value.trim())
+		url = new URL(candidate)
 	} catch {
 		fail('INVALID_BUCKET_IDENTITY', 'Mint URL must be valid')
 	}
-	if ((url.protocol !== 'https:' && url.protocol !== 'http:') || url.username || url.password || url.search || url.hash) {
+	const authority = candidate.match(/^[a-zA-Z][a-zA-Z\d+.-]*:\/\/([^/?#]*)/)?.[1]
+	if (
+		(url.protocol !== 'https:' && url.protocol !== 'http:') ||
+		url.username ||
+		url.password ||
+		authority?.includes('@') ||
+		candidate.includes('?') ||
+		candidate.includes('#')
+	) {
 		fail('INVALID_BUCKET_IDENTITY', 'Mint URL contains unsupported components')
 	}
-	url.pathname = normalizePercentEncoding(url.pathname).replace(/\/+$/, '') || '/'
-	return url.toString().replace(/\/$/, '') as CanonicalMintUrl
+	if (/\/{2,}$/.test(url.pathname)) {
+		fail('INVALID_BUCKET_IDENTITY', 'Mint URL contains ambiguous trailing path separators')
+	}
+	const normalizedPathname = normalizePercentEncoding(url.pathname)
+	url.pathname = normalizedPathname.endsWith('/') && normalizedPathname !== '/' ? normalizedPathname.slice(0, -1) : normalizedPathname
+	const canonical = url.toString().replace(/\/$/, '')
+	assertBoundedMintUrl(canonical)
+	return canonical as CanonicalMintUrl
 }
 
 export function normalizeUnit(value: unknown): string {
