@@ -174,6 +174,50 @@ function itemProjection(record: MigrationItemRecord): Readonly<MigrationItemReco
 	})
 }
 
+const AUTHORITY_REVISION_BY_PHASE: Readonly<Record<MigrationPhase, number>> = Object.freeze({
+	'legacy-active': 0,
+	'migration-snapshot-frozen': 1,
+	importing: 2,
+	verifying: 3,
+	'coco-ready': 4,
+	'cutover-committed': 5,
+})
+
+function assertStoredAuthoritySemantics(phase: MigrationPhase, revision: number): void {
+	if (AUTHORITY_REVISION_BY_PHASE[phase] !== revision) {
+		fail('COORDINATOR_STORAGE_FAILURE', 'Migration authority state is not reachable')
+	}
+}
+
+const REACHABLE_MIGRATION_ITEM_STATES = new Set([
+	'planned|0|unbound',
+	'planned|1|bound',
+	'prepared|1|unbound',
+	'prepared|2|bound',
+	'executing|3|bound',
+	'verified|4|bound',
+	'quarantined|1|unbound',
+	'quarantined|2|unbound',
+	'quarantined|2|bound',
+	'quarantined|3|bound',
+	'quarantined|4|bound',
+])
+
+function assertStoredMigrationItemSemantics(
+	state: MigrationItemState,
+	revision: number,
+	cocoOperationId: string | undefined,
+	sourceBucket: MonetaryBucketIdentity,
+): void {
+	if (sourceBucket.kind === 'coco-ordinary') {
+		fail('COORDINATOR_STORAGE_FAILURE', 'Migration item source is not migratable')
+	}
+	const binding = cocoOperationId === undefined ? 'unbound' : 'bound'
+	if (!REACHABLE_MIGRATION_ITEM_STATES.has(`${state}|${revision}|${binding}`)) {
+		fail('COORDINATOR_STORAGE_FAILURE', 'Migration item state is not reachable')
+	}
+}
+
 function storedAuthority(value: unknown): AuthorityRecord {
 	try {
 		const captured = captureObject(
@@ -191,6 +235,7 @@ function storedAuthority(value: unknown): AuthorityRecord {
 		if (wallet.pubkey !== user || wallet.environment !== environment) {
 			fail('COORDINATOR_STORAGE_FAILURE', 'Migration authority identity is inconsistent')
 		}
+		assertStoredAuthoritySemantics(phase, revision)
 		return { walletKey: wallet.namespace, user, environment, migrationEpoch, revision, phase }
 	} catch (error) {
 		if (error instanceof CocoHostError && error.code === 'COORDINATOR_STORAGE_FAILURE') throw error
@@ -243,6 +288,7 @@ function storedItem(value: unknown): MigrationItemRecord {
 		) {
 			fail('COORDINATOR_STORAGE_FAILURE', 'Migration item identity is inconsistent')
 		}
+		assertStoredMigrationItemSemantics(state, revision, cocoOperationId, bucket)
 		return {
 			id,
 			walletKey: wallet.namespace,

@@ -41,16 +41,16 @@ function check(condition: unknown, message: string): number {
 	return 1
 }
 
-async function rejectsCode(promise: Promise<unknown>, code: string): Promise<number> {
+async function rejectsCode(promise: Promise<unknown>, code: string, context = ''): Promise<number> {
 	try {
 		await promise
 	} catch (error) {
 		return check(
 			typeof error === 'object' && error !== null && (error as { code?: unknown }).code === code,
-			`Expected ${code}, received ${error instanceof Error ? error.message : String(error)}`,
+			`${context ? `${context}: ` : ''}Expected ${code}, received ${error instanceof Error ? error.message : String(error)}`,
 		)
 	}
-	throw new Error(`Expected rejection with ${code}`)
+	throw new Error(`${context ? `${context}: ` : ''}Expected rejection with ${code}`)
 }
 
 function oneRejectedWithCode(results: readonly PromiseSettledResult<unknown>[], code: string): number {
@@ -81,6 +81,10 @@ function store(configuration: IndexedDbMigrationCoordinatorStoreConfig): Indexed
 	return value
 }
 
+function configurationToDatabaseName(configuration: IndexedDbMigrationCoordinatorStoreConfig): string {
+	return new IndexedDbMigrationCoordinatorStore(configuration).databaseName
+}
+
 async function close(...stores: IndexedDbMigrationCoordinatorStore[]): Promise<void> {
 	await Promise.all(stores.map(async (value) => value.close()))
 	for (const value of stores) openStores.delete(value)
@@ -99,6 +103,38 @@ function requestValue<T>(request: IDBRequest<T>): Promise<T> {
 		request.onsuccess = () => resolve(request.result)
 		request.onerror = () => reject(request.error)
 	})
+}
+
+function transactionFinished(transaction: IDBTransaction): Promise<void> {
+	return new Promise((resolve, reject) => {
+		transaction.oncomplete = () => resolve()
+		transaction.onabort = () => reject(transaction.error)
+		transaction.onerror = () => reject(transaction.error)
+	})
+}
+
+async function rawRecord(databaseName: string, storeName: string, key: IDBValidKey): Promise<Record<string, unknown>> {
+	const database = await openRawDatabase(databaseName)
+	try {
+		const transaction = database.transaction(storeName, 'readonly')
+		const value = await requestValue(transaction.objectStore(storeName).get(key))
+		await transactionFinished(transaction)
+		return value as Record<string, unknown>
+	} finally {
+		database.close()
+	}
+}
+
+async function rawPut(databaseName: string, storeName: string, value: Record<string, unknown>): Promise<void> {
+	const database = await openRawDatabase(databaseName)
+	try {
+		const transaction = database.transaction(storeName, 'readwrite')
+		const complete = transactionFinished(transaction)
+		await requestValue(transaction.objectStore(storeName).put(value))
+		await complete
+	} finally {
+		database.close()
+	}
 }
 
 async function initialize(value: IndexedDbMigrationCoordinatorStore) {
@@ -148,6 +184,93 @@ async function runContract(): Promise<BrowserTestResult[]> {
 	return results
 }
 
+function dispatchFenceCommand(item: Record<string, unknown>, authorityRevision = 0, authorityPhase = 'legacy-active') {
+	return {
+		...authorityQuery(),
+		expectedAuthorityRevision: authorityRevision,
+		expectedEnvironment: 'test',
+		expectedPhase: authorityPhase,
+		workflow: 'legacy-ready-to-coco-receive',
+		bucketKey: monetaryBucketKey(SOURCE),
+		itemId: item.id ?? 'item-1',
+		expectedItemRevision: 0,
+		expectedItemState: 'planned',
+		expectedCocoOperationId: typeof item.cocoOperationId === 'string' ? item.cocoOperationId : 'operation-for-corruption-check',
+	}
+}
+
+async function assertCorruptAuthorityConsumersFail(
+	adapter: IndexedDbMigrationCoordinatorStore,
+	authority: Record<string, unknown>,
+): Promise<number> {
+	let assertions = await rejectsCode(adapter.loadAuthority(authorityQuery()), 'COORDINATOR_STORAGE_FAILURE')
+	assertions += await rejectsCode(
+		adapter.permissionsFor({ ...authorityQuery(), bucketKey: monetaryBucketKey(SOURCE) }),
+		'COORDINATOR_STORAGE_FAILURE',
+	)
+	assertions += await rejectsCode(adapter.nip60Policy(authorityQuery()), 'COORDINATOR_STORAGE_FAILURE')
+	assertions += await rejectsCode(
+		adapter.createInitialAuthority({ walletIdentity: USER, environment: 'test', migrationEpoch: EPOCH }),
+		'COORDINATOR_STORAGE_FAILURE',
+	)
+	assertions += await rejectsCode(
+		adapter.advanceAuthorityPhase({ ...authorityQuery(), expectedRevision: authority.revision, nextPhase: 'migration-snapshot-frozen' }),
+		'COORDINATOR_STORAGE_FAILURE',
+	)
+	assertions += await rejectsCode(
+		adapter.createPlannedMigrationItem({ ...authorityQuery(), itemId: 'corrupt-authority-item', sourceBucket: SOURCE }),
+		'COORDINATOR_STORAGE_FAILURE',
+	)
+	assertions += await rejectsCode(
+		adapter.revalidateDispatchFence(dispatchFenceCommand({}, Number(authority.revision), String(authority.phase))),
+		'COORDINATOR_STORAGE_FAILURE',
+	)
+	return assertions
+}
+
+async function assertCorruptItemConsumersFail(adapter: IndexedDbMigrationCoordinatorStore, item: Record<string, unknown>): Promise<number> {
+	const itemId = String(item.id)
+	const expectedRevision =
+		typeof item.revision === 'number' && Number.isSafeInteger(item.revision) && item.revision >= 0 ? item.revision : 0
+	let assertions = await rejectsCode(
+		adapter.loadMigrationItem({ ...authorityQuery(), itemId }),
+		'COORDINATOR_STORAGE_FAILURE',
+		'loadMigrationItem',
+	)
+	assertions += await rejectsCode(adapter.listMigrationItems(authorityQuery()), 'COORDINATOR_STORAGE_FAILURE', 'listMigrationItems')
+	assertions += await rejectsCode(
+		adapter.permissionsFor({ ...authorityQuery(), bucketKey: monetaryBucketKey(SOURCE) }),
+		'COORDINATOR_STORAGE_FAILURE',
+		'permissionsFor',
+	)
+	assertions += await rejectsCode(
+		adapter.revalidateDispatchFence(dispatchFenceCommand(item)),
+		'COORDINATOR_STORAGE_FAILURE',
+		'revalidateDispatchFence',
+	)
+	assertions += await rejectsCode(
+		adapter.createPlannedMigrationItem({ ...authorityQuery(), itemId, sourceBucket: SOURCE }),
+		'COORDINATOR_STORAGE_FAILURE',
+		'createPlannedMigrationItem',
+	)
+	assertions += await rejectsCode(
+		adapter.bindCocoOperationOnce({ ...authorityQuery(), itemId, expectedRevision, operationId: 'replacement-operation' }),
+		'COORDINATOR_STORAGE_FAILURE',
+		'bindCocoOperationOnce',
+	)
+	assertions += await rejectsCode(
+		adapter.advanceMigrationItem({ ...authorityQuery(), itemId, expectedRevision, action: { type: 'prepare' } }),
+		'COORDINATOR_STORAGE_FAILURE',
+		'advanceMigrationItem',
+	)
+	assertions += await rejectsCode(
+		adapter.quarantineMigrationItem({ ...authorityQuery(), itemId, expectedRevision, reason: 'malformed-source' }),
+		'COORDINATOR_STORAGE_FAILURE',
+		'quarantineMigrationItem',
+	)
+	return assertions
+}
+
 async function runFocusedBrowserTests(): Promise<BrowserTestResult[]> {
 	return [
 		await runTest('restart and close/reopen preserve exact state', async () => {
@@ -183,6 +306,239 @@ async function runFocusedBrowserTests(): Promise<BrowserTestResult[]> {
 			assertions += check(Object.isFrozen(authority) && Object.isFrozen(recovered), 'reloaded snapshots must be frozen')
 			assertions += check(reopened.databaseName.includes(WALLET), 'database name must bind full wallet namespace')
 			await close(reopened)
+			return assertions
+		}),
+		await runTest('every legal authority state survives a fresh adapter reopen', async () => {
+			const configuration = config('valid-authority-lifecycle')
+			let adapter = store(configuration)
+			let authority = await initialize(adapter)
+			const expected = [
+				['legacy-active', 0],
+				['migration-snapshot-frozen', 1],
+				['importing', 2],
+				['verifying', 3],
+				['coco-ready', 4],
+				['cutover-committed', 5],
+			] as const
+			let assertions = 0
+			for (let index = 0; index < expected.length; index += 1) {
+				await close(adapter)
+				adapter = store(configuration)
+				const loaded = await adapter.loadAuthority(authorityQuery())
+				assertions += check(
+					loaded.phase === expected[index][0] && loaded.revision === expected[index][1],
+					`legal authority ${expected[index][0]}@${expected[index][1]} did not survive reopen`,
+				)
+				if (index + 1 < expected.length) {
+					authority = await adapter.advanceAuthorityPhase({
+						...authorityQuery(),
+						expectedRevision: authority.revision,
+						nextPhase: expected[index + 1][0],
+					})
+				}
+			}
+			await close(adapter)
+			return assertions
+		}),
+		await runTest('impossible authority phase and revision pairs fail every authority read path', async () => {
+			const invalidPairs = [
+				['legacy-active', 1],
+				['legacy-active', 5],
+				['migration-snapshot-frozen', 0],
+				['importing', 0],
+				['importing', 1],
+				['verifying', 1],
+				['coco-ready', 0],
+				['cutover-committed', 0],
+				['cutover-committed', 4],
+				['cutover-committed', 6],
+			] as const
+			let assertions = 0
+			for (const [index, [phase, revision]] of invalidPairs.entries()) {
+				const configuration = config(`corrupt-authority-${index}`)
+				const creator = store(configuration)
+				await initialize(creator)
+				await close(creator)
+				const record = await rawRecord(configurationToDatabaseName(configuration), 'authority', WALLET)
+				const corrupt = { ...record, phase, revision }
+				await rawPut(configurationToDatabaseName(configuration), 'authority', corrupt)
+				const reader = store(configuration)
+				assertions += await assertCorruptAuthorityConsumersFail(reader, corrupt)
+				await close(reader)
+			}
+			return assertions
+		}),
+		await runTest('every legal item state and binding tuple survives a fresh adapter reopen', async () => {
+			const configuration = config('valid-item-lifecycle')
+			let adapter = store(configuration)
+			await initialize(adapter)
+			const expected: Array<readonly [string, string, number, boolean]> = []
+			const create = async (id: string) => planned(adapter, id)
+			const keep = (id: string, state: string, revision: number, bound: boolean) => expected.push([id, state, revision, bound])
+
+			await create('valid-planned-0')
+			keep('valid-planned-0', 'planned', 0, false)
+			let item = await create('valid-planned-1-bound')
+			item = await adapter.bindCocoOperationOnce({ ...authorityQuery(), itemId: item.id, expectedRevision: 0, operationId: 'op-planned' })
+			keep(item.id, item.state, item.revision, true)
+			item = await create('valid-prepared-1')
+			item = await adapter.advanceMigrationItem({ ...authorityQuery(), itemId: item.id, expectedRevision: 0, action: { type: 'prepare' } })
+			keep(item.id, item.state, item.revision, false)
+			item = await create('valid-prepared-2-bound')
+			item = await adapter.advanceMigrationItem({ ...authorityQuery(), itemId: item.id, expectedRevision: 0, action: { type: 'prepare' } })
+			item = await adapter.bindCocoOperationOnce({ ...authorityQuery(), itemId: item.id, expectedRevision: 1, operationId: 'op-prepared' })
+			keep(item.id, item.state, item.revision, true)
+			item = await create('valid-executing-3')
+			item = await adapter.bindCocoOperationOnce({ ...authorityQuery(), itemId: item.id, expectedRevision: 0, operationId: 'op-executing' })
+			item = await adapter.advanceMigrationItem({ ...authorityQuery(), itemId: item.id, expectedRevision: 1, action: { type: 'prepare' } })
+			item = await adapter.advanceMigrationItem({
+				...authorityQuery(),
+				itemId: item.id,
+				expectedRevision: 2,
+				action: { type: 'begin-execution' },
+			})
+			keep(item.id, item.state, item.revision, true)
+			item = await create('valid-verified-4')
+			item = await adapter.bindCocoOperationOnce({ ...authorityQuery(), itemId: item.id, expectedRevision: 0, operationId: 'op-verified' })
+			item = await adapter.advanceMigrationItem({ ...authorityQuery(), itemId: item.id, expectedRevision: 1, action: { type: 'prepare' } })
+			item = await adapter.advanceMigrationItem({
+				...authorityQuery(),
+				itemId: item.id,
+				expectedRevision: 2,
+				action: { type: 'begin-execution' },
+			})
+			item = await adapter.advanceMigrationItem({ ...authorityQuery(), itemId: item.id, expectedRevision: 3, action: { type: 'verify' } })
+			keep(item.id, item.state, item.revision, true)
+			item = await create('valid-quarantined-1')
+			item = await adapter.quarantineMigrationItem({
+				...authorityQuery(),
+				itemId: item.id,
+				expectedRevision: 0,
+				reason: 'malformed-source',
+			})
+			keep(item.id, item.state, item.revision, false)
+			item = await create('valid-quarantined-2-unbound')
+			item = await adapter.advanceMigrationItem({ ...authorityQuery(), itemId: item.id, expectedRevision: 0, action: { type: 'prepare' } })
+			item = await adapter.quarantineMigrationItem({
+				...authorityQuery(),
+				itemId: item.id,
+				expectedRevision: 1,
+				reason: 'malformed-source',
+			})
+			keep(item.id, item.state, item.revision, false)
+			item = await create('valid-quarantined-2-bound')
+			item = await adapter.bindCocoOperationOnce({
+				...authorityQuery(),
+				itemId: item.id,
+				expectedRevision: 0,
+				operationId: 'op-quarantine-2',
+			})
+			item = await adapter.quarantineMigrationItem({
+				...authorityQuery(),
+				itemId: item.id,
+				expectedRevision: 1,
+				reason: 'malformed-source',
+			})
+			keep(item.id, item.state, item.revision, true)
+			item = await create('valid-quarantined-3')
+			item = await adapter.bindCocoOperationOnce({
+				...authorityQuery(),
+				itemId: item.id,
+				expectedRevision: 0,
+				operationId: 'op-quarantine-3',
+			})
+			item = await adapter.advanceMigrationItem({ ...authorityQuery(), itemId: item.id, expectedRevision: 1, action: { type: 'prepare' } })
+			item = await adapter.quarantineMigrationItem({
+				...authorityQuery(),
+				itemId: item.id,
+				expectedRevision: 2,
+				reason: 'malformed-source',
+			})
+			keep(item.id, item.state, item.revision, true)
+			item = await create('valid-quarantined-4')
+			item = await adapter.bindCocoOperationOnce({
+				...authorityQuery(),
+				itemId: item.id,
+				expectedRevision: 0,
+				operationId: 'op-quarantine-4',
+			})
+			item = await adapter.advanceMigrationItem({ ...authorityQuery(), itemId: item.id, expectedRevision: 1, action: { type: 'prepare' } })
+			item = await adapter.advanceMigrationItem({
+				...authorityQuery(),
+				itemId: item.id,
+				expectedRevision: 2,
+				action: { type: 'begin-execution' },
+			})
+			item = await adapter.quarantineMigrationItem({
+				...authorityQuery(),
+				itemId: item.id,
+				expectedRevision: 3,
+				reason: 'malformed-source',
+			})
+			keep(item.id, item.state, item.revision, true)
+
+			await close(adapter)
+			adapter = store(configuration)
+			const listed = await adapter.listMigrationItems(authorityQuery())
+			let assertions = check(listed.length === expected.length, 'valid item matrix did not survive reopen')
+			for (const [id, state, revision, bound] of expected) {
+				const loaded = await adapter.loadMigrationItem({ ...authorityQuery(), itemId: id })
+				assertions += check(
+					loaded.state === state && loaded.revision === revision && Boolean(loaded.cocoOperationId) === bound,
+					`legal item tuple ${state}@${revision}/${bound ? 'bound' : 'unbound'} did not survive reopen`,
+				)
+			}
+			await close(adapter)
+			return assertions
+		}),
+		await runTest('semantically corrupt item rows fail every item read and mutation path', async () => {
+			const cocoOrdinary = monetaryBucketKey({ ...SOURCE, kind: 'coco-ordinary' })
+			const invalidWorkflowKey = monetaryBucketKey({
+				...SOURCE,
+				kind: 'pending-outbound',
+				workflowId: 'workflow-a',
+			}).replace(/workflow-a$/, '')
+			const cases: Array<readonly [string, (record: Record<string, unknown>) => Record<string, unknown>]> = [
+				['verified-zero-unbound', (record) => ({ ...record, state: 'verified', revision: 0 })],
+				['executing-unbound', (record) => ({ ...record, state: 'executing', revision: 3 })],
+				['verified-unbound', (record) => ({ ...record, state: 'verified', revision: 4 })],
+				['planned-zero-bound', (record) => ({ ...record, cocoOperationId: 'impossible-operation' })],
+				['coco-ordinary-source', (record) => ({ ...record, sourceBucketKey: cocoOrdinary })],
+				['bucket-mint-mismatch', (record) => ({ ...record, mint: 'https://other-mint.example' })],
+				['bucket-unit-mismatch', (record) => ({ ...record, unit: 'usd' })],
+				['bucket-workflow-mismatch', (record) => ({ ...record, sourceBucketKey: invalidWorkflowKey })],
+				['skipped-verified', (record) => ({ ...record, state: 'verified', revision: 2, cocoOperationId: 'skipped-operation' })],
+				['impossible-prepared-revision', (record) => ({ ...record, state: 'prepared', revision: 7, cocoOperationId: 'late-operation' })],
+				[
+					'quarantined-successor',
+					(record) => ({
+						...record,
+						state: 'quarantined',
+						revision: 5,
+						cocoOperationId: 'post-terminal',
+						quarantineReason: 'malformed-source',
+					}),
+				],
+				['unknown-state', (record) => ({ ...record, state: 'completed' })],
+				['negative-revision', (record) => ({ ...record, revision: -1 })],
+				['fractional-revision', (record) => ({ ...record, revision: 0.5 })],
+				['string-revision', (record) => ({ ...record, revision: '0' })],
+			]
+			let assertions = 0
+			for (const [index, [label, mutate]] of cases.entries()) {
+				const configuration = config(`corrupt-item-${index}-${label}`)
+				const creator = store(configuration)
+				await initialize(creator)
+				await planned(creator)
+				await close(creator)
+				const databaseName = configurationToDatabaseName(configuration)
+				const record = await rawRecord(databaseName, 'migrationItems', [WALLET, 'item-1'])
+				const corrupt = mutate(record)
+				await rawPut(databaseName, 'migrationItems', corrupt)
+				const reader = store(configuration)
+				assertions += await assertCorruptItemConsumersFail(reader, corrupt)
+				await close(reader)
+			}
 			return assertions
 		}),
 		await runTest('two adapters create one initial authority', async () => {
