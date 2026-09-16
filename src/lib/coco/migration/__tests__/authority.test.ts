@@ -7,6 +7,7 @@ import {
 	LEGACY_RETIREMENT_DEFERRED_PENDING_AUTHORITATIVE_INVENTORY,
 	MigrationCoordinator,
 } from '../coordinator'
+import { REQUIRED_MIGRATION_SOURCE_DOMAINS, type MigrationInventoryHeader } from '../inventory'
 import {
 	MAX_MINT_URL_UTF8_BYTES,
 	REJECTED_MINT_MIGRATION_INPUT_POLICY,
@@ -82,8 +83,66 @@ async function advanceTo(coordinator: MigrationCoordinator, target: MigrationPha
 	let status = await coordinator.status(query())
 	while (status.phase !== target) {
 		const next = phases[phases.indexOf(status.phase) + 1]
-		status = await coordinator.advanceAuthority({ ...query(), expectedRevision: status.revision, nextPhase: next })
+		if (next === 'migration-snapshot-frozen') {
+			const inventory = await completeInventory(coordinator)
+			status = (
+				await coordinator.sealInventoryAndFreezeSnapshot({
+					...query(),
+					expectedAuthorityRevision: status.revision,
+					expectedInventoryRevision: inventory.revision,
+				})
+			).authority
+		} else {
+			status = await coordinator.advanceAuthority({ ...query(), expectedRevision: status.revision, nextPhase: next })
+		}
 	}
+}
+
+async function completeInventory(coordinator: MigrationCoordinator): Promise<Readonly<MigrationInventoryHeader>> {
+	let inventory = (await coordinator.createInventory(query())).value
+	for (const item of await coordinator.items(query())) {
+		const sourceBucket = decodeMonetaryBucketKey(item.sourceBucketKey)
+		const sourceDomain =
+			sourceBucket.kind === 'auction-p2pk-recovery'
+				? 'auction-p2pk-locks'
+				: sourceBucket.kind === 'pending-outbound'
+					? 'pending-outbound'
+					: sourceBucket.kind === 'legacy-inflight'
+						? 'legacy-reservations'
+						: 'legacy-proof-store'
+		const discovery = await coordinator.discoverInventoryEntry({
+			...query(),
+			expectedInventoryRevision: inventory.revision,
+			entry: {
+				entryId: `entry:${item.id}`,
+				kind: 'migration-claim',
+				sourceDomain,
+				sourceLocator: `source:${item.id}`,
+				mint: item.mint,
+				unit: item.unit,
+				amount: 1n,
+				sourceBucket,
+				disposition: {
+					destinationDisposition: 'retained-legacy-workflow',
+					destinationAmount: 1n,
+					verifiedProtocolFee: 0n,
+					revision: 0,
+					migrationItemId: item.id,
+					migrationItemRevision: item.revision,
+				},
+			},
+		})
+		if (discovery.outcome !== 'recorded') throw new Error('test inventory unexpectedly invalidated')
+		inventory = discovery.inventory
+	}
+	for (const sourceDomain of REQUIRED_MIGRATION_SOURCE_DOMAINS) {
+		inventory = await coordinator.completeInventorySource({
+			...query(),
+			expectedInventoryRevision: inventory.revision,
+			completion: { sourceDomain, evidenceKind: 'test-fixture-snapshot', snapshotId: `snapshot:${sourceDomain}` },
+		})
+	}
+	return inventory
 }
 
 function expectCode(fn: () => unknown, code: CocoHostError['code']): void {
@@ -334,7 +393,12 @@ describe('coordinator advisory authority projections', () => {
 		const { coordinator } = await setup()
 		const legacy = bucket('legacy-ready')
 		const permission = await coordinator.permissionsFor({ ...query(), bucketKey: monetaryBucketKey(legacy) })
-		await coordinator.advanceAuthority({ ...query(), expectedRevision: 0, nextPhase: 'migration-snapshot-frozen' })
+		const inventory = await completeInventory(coordinator)
+		await coordinator.sealInventoryAndFreezeSnapshot({
+			...query(),
+			expectedAuthorityRevision: 0,
+			expectedInventoryRevision: inventory.revision,
+		})
 		await expect(coordinator.advanceAuthority(permission)).rejects.toMatchObject({ code: 'INVALID_TRANSITION' })
 		expect('authorize' in coordinator).toBe(false)
 	})

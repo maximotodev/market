@@ -4,6 +4,7 @@ import {
 	deleteIndexedDbMigrationControlTestDatabase,
 	type IndexedDbMigrationCoordinatorStoreConfig,
 } from '../indexedDbStore'
+import { REQUIRED_MIGRATION_SOURCE_DOMAINS, type MigrationInventoryHeader } from '../inventory'
 import { createMonetaryBucketIdentity, monetaryBucketKey } from '../types'
 import { STORE_CONTRACT_EPOCH, STORE_CONTRACT_USER, migrationCoordinatorStoreContractCases } from './storeContract.shared'
 
@@ -98,6 +99,50 @@ function openRawDatabase(name: string): Promise<IDBDatabase> {
 	})
 }
 
+function createVersionOneDatabase(name: string): Promise<IDBDatabase> {
+	return new Promise((resolve, reject) => {
+		const request = indexedDB.open(name, 1)
+		request.onupgradeneeded = () => {
+			request.result.createObjectStore('authority', { keyPath: 'walletKey' })
+			request.result.createObjectStore('migrationItems', { keyPath: ['walletKey', 'id'] })
+		}
+		request.onsuccess = () => resolve(request.result)
+		request.onerror = () => reject(request.error)
+		request.onblocked = () => reject(new Error('Version-one migration database creation was blocked'))
+	})
+}
+
+function createVersionTwoDatabase(name: string): Promise<IDBDatabase> {
+	return new Promise((resolve, reject) => {
+		const request = indexedDB.open(name, 2)
+		request.onupgradeneeded = () => {
+			request.result.createObjectStore('authority', { keyPath: 'walletKey' })
+			request.result.createObjectStore('migrationItems', { keyPath: ['walletKey', 'id'] })
+			request.result.createObjectStore('quarantineRecovery', { keyPath: ['walletKey', 'sourceItemId'] })
+		}
+		request.onsuccess = () => resolve(request.result)
+		request.onerror = () => reject(request.error)
+		request.onblocked = () => reject(new Error('Version-two migration database creation was blocked'))
+	})
+}
+
+function createVersionThreeSealFaultDatabase(name: string): Promise<IDBDatabase> {
+	return new Promise((resolve, reject) => {
+		const request = indexedDB.open(name, 3)
+		request.onupgradeneeded = () => {
+			const authority = request.result.createObjectStore('authority', { keyPath: 'walletKey' })
+			authority.createIndex('test-only-unique-authority-phase', 'phase', { unique: true })
+			request.result.createObjectStore('migrationItems', { keyPath: ['walletKey', 'id'] })
+			request.result.createObjectStore('quarantineRecovery', { keyPath: ['walletKey', 'sourceItemId'] })
+			request.result.createObjectStore('migrationInventory', { keyPath: ['walletKey', 'migrationEpoch'] })
+			request.result.createObjectStore('migrationInventoryEntries', { keyPath: ['walletKey', 'migrationEpoch', 'id'] })
+		}
+		request.onsuccess = () => resolve(request.result)
+		request.onerror = () => reject(request.error)
+		request.onblocked = () => reject(new Error('Version-three seal fault database creation was blocked'))
+	})
+}
+
 function requestValue<T>(request: IDBRequest<T>): Promise<T> {
 	return new Promise((resolve, reject) => {
 		request.onsuccess = () => resolve(request.result)
@@ -137,6 +182,18 @@ async function rawPut(databaseName: string, storeName: string, value: Record<str
 	}
 }
 
+async function rawDelete(databaseName: string, storeName: string, key: IDBValidKey): Promise<void> {
+	const database = await openRawDatabase(databaseName)
+	try {
+		const transaction = database.transaction(storeName, 'readwrite')
+		const complete = transactionFinished(transaction)
+		await requestValue(transaction.objectStore(storeName).delete(key))
+		await complete
+	} finally {
+		database.close()
+	}
+}
+
 async function initialize(value: IndexedDbMigrationCoordinatorStore) {
 	return (await value.createInitialAuthority({ walletIdentity: USER, environment: 'test', migrationEpoch: EPOCH })).value
 }
@@ -153,6 +210,53 @@ async function planned(value: IndexedDbMigrationCoordinatorStore, itemId = 'item
 			sourceBucket: SOURCE,
 		})
 	).value
+}
+
+async function completeInventory(value: IndexedDbMigrationCoordinatorStore): Promise<Readonly<MigrationInventoryHeader>> {
+	let inventory = (await value.createMigrationInventory(authorityQuery())).value
+	for (const item of await value.listMigrationItems(authorityQuery())) {
+		const discovery = await value.discoverMigrationInventoryEntry({
+			...authorityQuery(),
+			expectedInventoryRevision: inventory.revision,
+			entry: {
+				entryId: `entry:${item.id}`,
+				kind: 'migration-claim',
+				sourceDomain: 'legacy-proof-store',
+				sourceLocator: `source:${item.id}`,
+				mint: item.mint,
+				unit: item.unit,
+				amount: 1n,
+				sourceBucket: SOURCE,
+				disposition: {
+					destinationDisposition: 'retained-legacy-workflow',
+					destinationAmount: 1n,
+					verifiedProtocolFee: 0n,
+					revision: 0,
+					migrationItemId: item.id,
+					migrationItemRevision: item.revision,
+				},
+			},
+		})
+		if (discovery.outcome !== 'recorded') throw new Error('browser test inventory unexpectedly invalidated')
+		inventory = discovery.inventory
+	}
+	for (const sourceDomain of REQUIRED_MIGRATION_SOURCE_DOMAINS) {
+		inventory = await value.completeMigrationInventorySource({
+			...authorityQuery(),
+			expectedInventoryRevision: inventory.revision,
+			completion: { sourceDomain, evidenceKind: 'test-fixture-snapshot', snapshotId: `snapshot:${sourceDomain}` },
+		})
+	}
+	return inventory
+}
+
+async function freezeSnapshot(value: IndexedDbMigrationCoordinatorStore) {
+	const inventory = await completeInventory(value)
+	return value.sealInventoryAndFreezeSnapshot({
+		...authorityQuery(),
+		expectedAuthorityRevision: 0,
+		expectedInventoryRevision: inventory.revision,
+	})
 }
 
 async function runTest(name: string, body: () => Promise<number>): Promise<BrowserTestResult> {
@@ -209,6 +313,7 @@ async function assertCorruptAuthorityConsumersFail(
 		'COORDINATOR_STORAGE_FAILURE',
 	)
 	assertions += await rejectsCode(adapter.nip60Policy(authorityQuery()), 'COORDINATOR_STORAGE_FAILURE')
+	assertions += await rejectsCode(adapter.listQuarantineRecoveryHandoffs(authorityQuery()), 'COORDINATOR_STORAGE_FAILURE')
 	assertions += await rejectsCode(
 		adapter.createInitialAuthority({ walletIdentity: USER, environment: 'test', migrationEpoch: EPOCH }),
 		'COORDINATOR_STORAGE_FAILURE',
@@ -238,6 +343,11 @@ async function assertCorruptItemConsumersFail(adapter: IndexedDbMigrationCoordin
 		'loadMigrationItem',
 	)
 	assertions += await rejectsCode(adapter.listMigrationItems(authorityQuery()), 'COORDINATOR_STORAGE_FAILURE', 'listMigrationItems')
+	assertions += await rejectsCode(
+		adapter.listQuarantineRecoveryHandoffs(authorityQuery()),
+		'COORDINATOR_STORAGE_FAILURE',
+		'listQuarantineRecoveryHandoffs',
+	)
 	assertions += await rejectsCode(
 		adapter.permissionsFor({ ...authorityQuery(), bucketKey: monetaryBucketKey(SOURCE) }),
 		'COORDINATOR_STORAGE_FAILURE',
@@ -277,7 +387,7 @@ async function runFocusedBrowserTests(): Promise<BrowserTestResult[]> {
 			const configuration = config('restart')
 			const first = store(configuration)
 			await initialize(first)
-			await first.advanceAuthorityPhase({ ...authorityQuery(), expectedRevision: 0, nextPhase: 'migration-snapshot-frozen' })
+			await freezeSnapshot(first)
 			const item = await planned(first)
 			const prepared = await first.advanceMigrationItem({
 				...authorityQuery(),
@@ -308,6 +418,293 @@ async function runFocusedBrowserTests(): Promise<BrowserTestResult[]> {
 			await close(reopened)
 			return assertions
 		}),
+		await runTest('quarantine handoff survives close/reopen and remains read-only', async () => {
+			const configuration = config('quarantine-restart')
+			const first = store(configuration)
+			await initialize(first)
+			const item = await planned(first)
+			const quarantined = await first.quarantineMigrationItem({
+				...authorityQuery(),
+				itemId: item.id,
+				expectedRevision: item.revision,
+				reason: 'prepared-operation-ambiguous',
+			})
+			await close(first)
+			const reopened = store(configuration)
+			const handoffs = await reopened.listQuarantineRecoveryHandoffs(authorityQuery())
+			let assertions = check(handoffs.length === 1, 'exactly one handoff must survive restart')
+			assertions += check(
+				handoffs[0].sourceItemId === item.id &&
+					handoffs[0].sourceItemRevision === quarantined.revision &&
+					handoffs[0].status === 'authoritative-reconciliation-required',
+				'restarted handoff lost immutable provenance',
+			)
+			assertions += check(
+				(await reopened.loadMigrationItem({ ...authorityQuery(), itemId: item.id })).state === 'quarantined',
+				'restart reopened the quarantined source item',
+			)
+			await close(reopened)
+			return assertions
+		}),
+		await runTest('version-one quarantined items gain handoffs in the atomic schema upgrade', async () => {
+			const configuration = config('quarantine-upgrade')
+			const databaseName = configurationToDatabaseName(configuration)
+			const database = await createVersionOneDatabase(databaseName)
+			const transaction = database.transaction(['authority', 'migrationItems'], 'readwrite')
+			const complete = transactionFinished(transaction)
+			await requestValue(
+				transaction.objectStore('authority').add({
+					walletKey: WALLET,
+					user: USER,
+					environment: 'test',
+					migrationEpoch: EPOCH,
+					revision: 0,
+					phase: 'legacy-active',
+				}),
+			)
+			await requestValue(
+				transaction.objectStore('migrationItems').add({
+					id: 'legacy-quarantine',
+					walletKey: WALLET,
+					user: USER,
+					environment: 'test',
+					migrationEpoch: EPOCH,
+					sourceBucketKey: monetaryBucketKey(SOURCE),
+					mint: SOURCE.mint,
+					unit: SOURCE.unit,
+					state: 'quarantined',
+					revision: 1,
+					quarantineReason: 'mint-state-unresolved',
+				}),
+			)
+			await complete
+			database.close()
+			const upgraded = store(configuration)
+			const handoffs = await upgraded.listQuarantineRecoveryHandoffs(authorityQuery())
+			let assertions = check(handoffs.length === 1, 'schema upgrade did not backfill exactly one handoff')
+			assertions += check(
+				handoffs[0].sourceItemId === 'legacy-quarantine' && handoffs[0].sourceItemRevision === 1,
+				'schema upgrade did not bind the exact terminal source revision',
+			)
+			assertions += check(
+				(await upgraded.loadMigrationItem({ ...authorityQuery(), itemId: 'legacy-quarantine' })).state === 'quarantined',
+				'schema upgrade reopened the source item',
+			)
+			await close(upgraded)
+			return assertions
+		}),
+		await runTest('version-two upgrade adds empty inventory stores without auto-certifying legacy state', async () => {
+			const configuration = config('inventory-v2-upgrade')
+			const databaseName = configurationToDatabaseName(configuration)
+			const database = await createVersionTwoDatabase(databaseName)
+			const transaction = database.transaction('authority', 'readwrite')
+			const complete = transactionFinished(transaction)
+			await requestValue(
+				transaction.objectStore('authority').add({
+					walletKey: WALLET,
+					user: USER,
+					environment: 'test',
+					migrationEpoch: EPOCH,
+					revision: 0,
+					phase: 'legacy-active',
+				}),
+			)
+			await complete
+			database.close()
+			const upgraded = store(configuration)
+			let assertions = await rejectsCode(upgraded.loadMigrationInventory(authorityQuery()), 'COORDINATOR_RECORD_NOT_FOUND')
+			assertions += check(
+				(await upgraded.loadAuthority(authorityQuery())).phase === 'legacy-active',
+				'v2 authority did not survive upgrade',
+			)
+			await close(upgraded)
+			const raw = await openRawDatabase(databaseName)
+			assertions += check(
+				[...raw.objectStoreNames].sort().join('|') ===
+					['authority', 'migrationInventory', 'migrationInventoryEntries', 'migrationItems', 'quarantineRecovery'].sort().join('|'),
+				'v3 inventory stores were not added exactly',
+			)
+			raw.close()
+			return assertions
+		}),
+		await runTest('second seal write failure rolls back the first inventory write', async () => {
+			const failureConfiguration = config('inventory-seal-post-first-write-abort')
+			const failureDatabase = await createVersionThreeSealFaultDatabase(configurationToDatabaseName(failureConfiguration))
+			failureDatabase.close()
+			let failing = store(failureConfiguration)
+			await initialize(failing)
+			const failingInventory = await completeInventory(failing)
+			const failureDatabaseName = failing.databaseName
+			await close(failing)
+			await rawPut(failureDatabaseName, 'authority', {
+				walletKey: 'test-only-seal-phase-blocker',
+				user: 'b'.repeat(64),
+				environment: 'test',
+				migrationEpoch: 'test-only-blocker',
+				revision: 1,
+				phase: 'migration-snapshot-frozen',
+			})
+			failing = store(failureConfiguration)
+			let assertions = await rejectsCode(
+				failing.sealInventoryAndFreezeSnapshot({
+					...authorityQuery(),
+					expectedAuthorityRevision: 0,
+					expectedInventoryRevision: failingInventory.revision,
+				}),
+				'COORDINATOR_STORAGE_FAILURE',
+			)
+			assertions += check(
+				(await failing.loadAuthority(authorityQuery())).phase === 'legacy-active',
+				'failed second write advanced authority',
+			)
+			assertions += check(
+				(await failing.loadMigrationInventory(authorityQuery())).status === 'building',
+				'failed second write did not roll back the earlier inventory seal write',
+			)
+			await close(failing)
+			failing = store(failureConfiguration)
+			assertions += check(
+				(await failing.loadAuthority(authorityQuery())).phase === 'legacy-active' &&
+					(await failing.loadMigrationInventory(authorityQuery())).status === 'building',
+				'post-first-write abort did not remain atomic after reopen',
+			)
+			await close(failing)
+
+			const successConfiguration = config('inventory-seal-restart')
+			const first = store(successConfiguration)
+			await initialize(first)
+			const inventory = await completeInventory(first)
+			const sealed = await first.sealInventoryAndFreezeSnapshot({
+				...authorityQuery(),
+				expectedAuthorityRevision: 0,
+				expectedInventoryRevision: inventory.revision,
+			})
+			assertions += check(
+				sealed.authority.phase === 'migration-snapshot-frozen' && sealed.inventory.status === 'sealed',
+				'successful atomic seal returned inconsistent state',
+			)
+			await close(first)
+			const reopened = store(successConfiguration)
+			assertions += check(
+				(await reopened.loadAuthority(authorityQuery())).phase === 'migration-snapshot-frozen' &&
+					(await reopened.loadMigrationInventory(authorityQuery())).status === 'sealed',
+				'atomic seal/freeze did not survive reopen',
+			)
+			await close(reopened)
+			return assertions
+		}),
+		await runTest('late monetary discovery invalidation remains durable across reopen', async () => {
+			const configuration = config('inventory-late-discovery-restart')
+			let adapter = store(configuration)
+			await initialize(adapter)
+			await freezeSnapshot(adapter)
+			await planned(adapter, 'late-item')
+			let assertions = check(
+				(await adapter.loadMigrationInventory(authorityQuery())).status === 'invalidated',
+				'late migration item did not invalidate the sealed inventory',
+			)
+			await close(adapter)
+			adapter = store(configuration)
+			assertions += check(
+				(await adapter.loadMigrationInventory(authorityQuery())).status === 'invalidated',
+				'late discovery invalidation did not survive reopen',
+			)
+			await close(adapter)
+			return assertions
+		}),
+		await runTest('associated malformed sealed observation invalidation survives reopen', async () => {
+			const configuration = config('inventory-associated-malformed-restart')
+			let adapter = store(configuration)
+			await initialize(adapter)
+			const item = await planned(adapter)
+			const inventory = await completeInventory(adapter)
+			const sealed = await adapter.sealInventoryAndFreezeSnapshot({
+				...authorityQuery(),
+				expectedAuthorityRevision: 0,
+				expectedInventoryRevision: inventory.revision,
+			})
+			const result = await adapter.discoverMigrationInventoryEntry({
+				...authorityQuery(),
+				expectedInventoryRevision: sealed.inventory.revision,
+				entry: {
+					entryId: `entry:${item.id}`,
+					sourceLocator: `source:${item.id}`,
+					unexpected: true,
+				},
+			})
+			let assertions = check(
+				result.outcome === 'late-discovery-invalidated',
+				'associated malformed observation did not invalidate the sealed inventory',
+			)
+			await close(adapter)
+			adapter = store(configuration)
+			assertions += check(
+				(await adapter.loadMigrationInventory(authorityQuery())).status === 'invalidated',
+				'associated malformed invalidation did not survive reopen',
+			)
+			await close(adapter)
+			return assertions
+		}),
+		await runTest('handoff write failure aborts the quarantine transition', async () => {
+			const configuration = config('quarantine-atomic-abort')
+			const adapter = store(configuration)
+			await initialize(adapter)
+			const item = await planned(adapter)
+			const databaseName = adapter.databaseName
+			await close(adapter)
+			await rawPut(databaseName, 'quarantineRecovery', {
+				walletKey: WALLET,
+				user: USER,
+				environment: 'test',
+				migrationEpoch: EPOCH,
+				sourceItemId: item.id,
+				sourceItemRevision: item.revision + 1,
+				sourceBucketKey: item.sourceBucketKey,
+				status: 'authoritative-reconciliation-required',
+				quarantineReason: 'malformed-source',
+			})
+			const reopened = store(configuration)
+			let assertions = await rejectsCode(
+				reopened.quarantineMigrationItem({
+					...authorityQuery(),
+					itemId: item.id,
+					expectedRevision: item.revision,
+					reason: 'mint-state-unresolved',
+				}),
+				'COORDINATOR_STORAGE_FAILURE',
+			)
+			const unchanged = await reopened.loadMigrationItem({ ...authorityQuery(), itemId: item.id })
+			assertions += check(
+				unchanged.state === 'planned' && unchanged.revision === item.revision,
+				'failed handoff write committed quarantine',
+			)
+			await close(reopened)
+			return assertions
+		}),
+		await runTest('missing recovery handoff fails discovery closed without reopening the source', async () => {
+			const configuration = config('quarantine-missing-handoff')
+			const adapter = store(configuration)
+			await initialize(adapter)
+			const item = await planned(adapter)
+			const quarantined = await adapter.quarantineMigrationItem({
+				...authorityQuery(),
+				itemId: item.id,
+				expectedRevision: item.revision,
+				reason: 'mint-state-unresolved',
+			})
+			const databaseName = adapter.databaseName
+			await close(adapter)
+			await rawDelete(databaseName, 'quarantineRecovery', [WALLET, item.id])
+			const reopened = store(configuration)
+			let assertions = await rejectsCode(reopened.listQuarantineRecoveryHandoffs(authorityQuery()), 'COORDINATOR_STORAGE_FAILURE')
+			const source = await reopened.loadMigrationItem({ ...authorityQuery(), itemId: item.id })
+			assertions += check(
+				source.state === 'quarantined' && source.revision === quarantined.revision,
+				'missing handoff reopened or rewrote the source item',
+			)
+			await close(reopened)
+			return assertions
+		}),
 		await runTest('every legal authority state survives a fresh adapter reopen', async () => {
 			const configuration = config('valid-authority-lifecycle')
 			let adapter = store(configuration)
@@ -330,11 +727,14 @@ async function runFocusedBrowserTests(): Promise<BrowserTestResult[]> {
 					`legal authority ${expected[index][0]}@${expected[index][1]} did not survive reopen`,
 				)
 				if (index + 1 < expected.length) {
-					authority = await adapter.advanceAuthorityPhase({
-						...authorityQuery(),
-						expectedRevision: authority.revision,
-						nextPhase: expected[index + 1][0],
-					})
+					authority =
+						expected[index + 1][0] === 'migration-snapshot-frozen'
+							? (await freezeSnapshot(adapter)).authority
+							: await adapter.advanceAuthorityPhase({
+									...authorityQuery(),
+									expectedRevision: authority.revision,
+									nextPhase: expected[index + 1][0],
+								})
 				}
 			}
 			await close(adapter)
@@ -554,13 +954,17 @@ async function runFocusedBrowserTests(): Promise<BrowserTestResult[]> {
 			await close(first, second)
 			return assertions
 		}),
-		await runTest('two adapters advancing one authority revision have one winner', async () => {
+		await runTest('two adapters sealing one inventory and authority revision have one winner', async () => {
 			const configuration = config('authority-race')
 			const first = store(configuration)
 			const second = store(configuration)
 			await initialize(first)
-			const command = { ...authorityQuery(), expectedRevision: 0, nextPhase: 'migration-snapshot-frozen' }
-			const results = await Promise.allSettled([first.advanceAuthorityPhase(command), second.advanceAuthorityPhase(command)])
+			const inventory = await completeInventory(first)
+			const command = { ...authorityQuery(), expectedAuthorityRevision: 0, expectedInventoryRevision: inventory.revision }
+			const results = await Promise.allSettled([
+				first.sealInventoryAndFreezeSnapshot(command),
+				second.sealInventoryAndFreezeSnapshot(command),
+			])
 			let assertions = check(results.filter((result) => result.status === 'fulfilled').length === 1, 'authority race must have one winner')
 			assertions += check(results.filter((result) => result.status === 'rejected').length === 1, 'authority race must have one loser')
 			assertions += oneRejectedWithCode(results, 'STALE_REVISION')
@@ -629,7 +1033,7 @@ async function runFocusedBrowserTests(): Promise<BrowserTestResult[]> {
 			const currentConfig = config('epoch')
 			const current = store(currentConfig)
 			await initialize(current)
-			await current.advanceAuthorityPhase({ ...authorityQuery(), expectedRevision: 0, nextPhase: 'migration-snapshot-frozen' })
+			await freezeSnapshot(current)
 			const staleConfig = { ...currentConfig, migrationEpoch: 'epoch-prior' }
 			const stale = store(staleConfig)
 			let assertions = await rejectsCode(
@@ -652,7 +1056,7 @@ async function runFocusedBrowserTests(): Promise<BrowserTestResult[]> {
 			const stale = await oldRuntime.loadAuthority(authorityQuery())
 			await close(oldRuntime)
 			const winner = store(configuration)
-			await winner.advanceAuthorityPhase({ ...authorityQuery(), expectedRevision: stale.revision, nextPhase: 'migration-snapshot-frozen' })
+			await freezeSnapshot(winner)
 			await close(winner)
 			const reopened = store(configuration)
 			let assertions = await rejectsCode(
@@ -670,7 +1074,7 @@ async function runFocusedBrowserTests(): Promise<BrowserTestResult[]> {
 			const currentRuntime = store(configuration)
 			await initialize(oldRuntime)
 			const stale = await oldRuntime.loadAuthority(authorityQuery())
-			await currentRuntime.advanceAuthorityPhase({ ...authorityQuery(), expectedRevision: 0, nextPhase: 'migration-snapshot-frozen' })
+			await freezeSnapshot(currentRuntime)
 			const assertions = await rejectsCode(
 				oldRuntime.advanceAuthorityPhase({ ...authorityQuery(), expectedRevision: stale.revision, nextPhase: 'migration-snapshot-frozen' }),
 				'STALE_REVISION',
@@ -683,7 +1087,7 @@ async function runFocusedBrowserTests(): Promise<BrowserTestResult[]> {
 			const first = store(configuration)
 			const second = store(configuration)
 			await initialize(first)
-			await first.advanceAuthorityPhase({ ...authorityQuery(), expectedRevision: 0, nextPhase: 'migration-snapshot-frozen' })
+			await freezeSnapshot(first)
 			await first.advanceAuthorityPhase({ ...authorityQuery(), expectedRevision: 1, nextPhase: 'importing' })
 			const item = await planned(first)
 			const prepared = await first.advanceMigrationItem({
@@ -738,7 +1142,7 @@ async function runFocusedBrowserTests(): Promise<BrowserTestResult[]> {
 			await close(first, second)
 			return assertions
 		}),
-		await runTest('schema contains only authority and migration item control records', async () => {
+		await runTest('schema contains only migration authority, item, handoff, and inventory control records', async () => {
 			const configuration = config('schema')
 			const adapter = store(configuration)
 			await initialize(adapter)
@@ -748,17 +1152,28 @@ async function runFocusedBrowserTests(): Promise<BrowserTestResult[]> {
 			const database = await openRawDatabase(databaseName)
 			const storeNames = [...database.objectStoreNames]
 			let assertions = check(
-				JSON.stringify(storeNames.sort()) === JSON.stringify(['authority', 'migrationItems']),
+				JSON.stringify(storeNames.sort()) ===
+					JSON.stringify(['authority', 'migrationInventory', 'migrationInventoryEntries', 'migrationItems', 'quarantineRecovery']),
 				'IndexedDB schema contains unexpected object stores',
 			)
 			const transaction = database.transaction(storeNames, 'readonly')
 			const authorityRows = await requestValue(transaction.objectStore('authority').getAll())
 			const itemRows = await requestValue(transaction.objectStore('migrationItems').getAll())
-			const serialized = JSON.stringify([authorityRows, itemRows])
-			for (const forbidden of ['proof', 'token', 'secret', 'witness', 'privateKey', 'refundKey', 'outputData']) {
+			const handoffRows = await requestValue(transaction.objectStore('quarantineRecovery').getAll())
+			const inventoryRows = await requestValue(transaction.objectStore('migrationInventory').getAll())
+			const inventoryEntryRows = await requestValue(transaction.objectStore('migrationInventoryEntries').getAll())
+			const serialized = JSON.stringify([authorityRows, itemRows, handoffRows, inventoryRows, inventoryEntryRows])
+			for (const forbidden of ['proof', 'token', 'secret', 'witness', 'privateKey', 'refundKey', 'outputData', 'nwc']) {
 				assertions += check(!serialized.toLowerCase().includes(forbidden.toLowerCase()), `schema persisted forbidden ${forbidden} material`)
 			}
-			assertions += check(authorityRows.length === 1 && itemRows.length === 1, 'schema record count is incorrect')
+			assertions += check(
+				authorityRows.length === 1 &&
+					itemRows.length === 1 &&
+					handoffRows.length === 0 &&
+					inventoryRows.length === 0 &&
+					inventoryEntryRows.length === 0,
+				'schema record count is incorrect',
+			)
 			database.close()
 			return assertions
 		}),

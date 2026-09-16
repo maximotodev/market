@@ -7,7 +7,33 @@ import {
 	type CocoG9aEnvironment,
 } from '../namespace'
 import type { AuthorityStatus, MonetaryPermissionProjection } from './authority'
-import type { DomainCreationResult, MigrationCoordinatorStore, MigrationItemRecord } from './coordinator'
+import { projectSealedMigrationInventoryAccounting, type MigrationAccountingReport } from './accounting'
+import type {
+	DomainCreationResult,
+	MigrationCoordinatorStore,
+	MigrationInventorySealResult,
+	MigrationItemRecord,
+	QuarantineRecoveryRecord,
+} from './coordinator'
+import {
+	assertInventoryDispositionReferences,
+	assertInventoryEntriesCoherent,
+	completeInventorySource,
+	createBuildingInventory,
+	discoverInventoryEntry,
+	invalidateInventory,
+	inventoryEntryProjection,
+	inventoryHasMigrationItem,
+	inventoryProjection,
+	parseStoredInventoryEntry,
+	parseStoredInventoryHeader,
+	requireInventoryRevision,
+	sealInventory,
+	updateInventoryEntryDisposition,
+	type MigrationInventoryEntry,
+	type MigrationInventoryEntryDiscoveryResult,
+	type MigrationInventoryHeader,
+} from './inventory'
 import {
 	canonicalizeMintUrl,
 	createMonetaryBucketIdentity,
@@ -27,10 +53,13 @@ import {
 } from './types'
 
 export const PLEBEIAN_MIGRATION_CONTROL_DB_PREFIX = 'plebeian-market:coco:migration-control:v1'
-export const PLEBEIAN_MIGRATION_CONTROL_DB_VERSION = 1
+export const PLEBEIAN_MIGRATION_CONTROL_DB_VERSION = 3
 
 const AUTHORITY_STORE = 'authority'
 const MIGRATION_ITEM_STORE = 'migrationItems'
+const QUARANTINE_RECOVERY_STORE = 'quarantineRecovery'
+const MIGRATION_INVENTORY_STORE = 'migrationInventory'
+const MIGRATION_INVENTORY_ENTRY_STORE = 'migrationInventoryEntries'
 const SAFE_TEST_INSTANCE = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/
 
 type AuthorityRecord = AuthorityStatus
@@ -174,6 +203,39 @@ function itemProjection(record: MigrationItemRecord): Readonly<MigrationItemReco
 	})
 }
 
+function recoveryProjection(record: QuarantineRecoveryRecord): Readonly<QuarantineRecoveryRecord> {
+	return Object.freeze({
+		walletKey: record.walletKey,
+		user: record.user,
+		environment: record.environment,
+		migrationEpoch: record.migrationEpoch,
+		sourceItemId: record.sourceItemId,
+		sourceItemRevision: record.sourceItemRevision,
+		sourceBucketKey: record.sourceBucketKey,
+		status: record.status,
+		quarantineReason: record.quarantineReason,
+		...(record.cocoOperationId ? { cocoOperationId: record.cocoOperationId } : {}),
+	})
+}
+
+function quarantineRecoveryRecord(item: MigrationItemRecord): QuarantineRecoveryRecord {
+	if (item.state !== 'quarantined' || !item.quarantineReason) {
+		fail('INVALID_QUARANTINE_TRANSITION', 'Recovery handoff requires a quarantined migration item')
+	}
+	return {
+		walletKey: item.walletKey,
+		user: item.user,
+		environment: item.environment,
+		migrationEpoch: item.migrationEpoch,
+		sourceItemId: item.id,
+		sourceItemRevision: item.revision,
+		sourceBucketKey: item.sourceBucketKey,
+		status: 'authoritative-reconciliation-required',
+		quarantineReason: item.quarantineReason,
+		...(item.cocoOperationId ? { cocoOperationId: item.cocoOperationId } : {}),
+	}
+}
+
 const AUTHORITY_REVISION_BY_PHASE: Readonly<Record<MigrationPhase, number>> = Object.freeze({
 	'legacy-active': 0,
 	'migration-snapshot-frozen': 1,
@@ -309,6 +371,79 @@ function storedItem(value: unknown): MigrationItemRecord {
 	}
 }
 
+function storedRecovery(value: unknown): QuarantineRecoveryRecord {
+	try {
+		const captured = captureObject(
+			value,
+			[
+				'walletKey',
+				'user',
+				'environment',
+				'migrationEpoch',
+				'sourceItemId',
+				'sourceItemRevision',
+				'sourceBucketKey',
+				'status',
+				'quarantineReason',
+				'cocoOperationId',
+			],
+			'COORDINATOR_STORAGE_FAILURE',
+			'Quarantine recovery record',
+		)
+		const wallet = parseCocoWalletNamespace(captured.walletKey)
+		const user = normalizeNostrPubkey(captured.user)
+		const environment = parseCocoEnvironment(captured.environment)
+		const migrationEpoch = requireEpoch(captured.migrationEpoch)
+		const sourceItemId = requireSafeId(captured.sourceItemId, 'source item id')
+		const sourceItemRevision = requireRevision(captured.sourceItemRevision)
+		if (sourceItemRevision < 1) fail('COORDINATOR_STORAGE_FAILURE', 'Quarantine recovery source revision is invalid')
+		if (typeof captured.sourceBucketKey !== 'string') fail('COORDINATOR_STORAGE_FAILURE', 'Recovery bucket key is invalid')
+		const bucket = decodeMonetaryBucketKey(captured.sourceBucketKey)
+		const sourceBucketKey = monetaryBucketKey(bucket)
+		if (captured.status !== 'authoritative-reconciliation-required') {
+			fail('COORDINATOR_STORAGE_FAILURE', 'Quarantine recovery status is invalid')
+		}
+		const quarantineReason = parseQuarantineReason(captured.quarantineReason)
+		const cocoOperationId = captured.cocoOperationId === undefined ? undefined : requireSafeId(captured.cocoOperationId, 'operationId')
+		if (wallet.pubkey !== user || wallet.environment !== environment || bucket.user !== user) {
+			fail('COORDINATOR_STORAGE_FAILURE', 'Quarantine recovery identity is inconsistent')
+		}
+		return {
+			walletKey: wallet.namespace,
+			user,
+			environment,
+			migrationEpoch,
+			sourceItemId,
+			sourceItemRevision,
+			sourceBucketKey,
+			status: 'authoritative-reconciliation-required',
+			quarantineReason,
+			...(cocoOperationId ? { cocoOperationId } : {}),
+		}
+	} catch (error) {
+		if (error instanceof CocoHostError && error.code === 'COORDINATOR_STORAGE_FAILURE') throw error
+		fail('COORDINATOR_STORAGE_FAILURE', 'Quarantine recovery record is invalid')
+	}
+}
+
+function assertRecoveryMatchesItem(record: QuarantineRecoveryRecord, item: MigrationItemRecord | undefined): void {
+	if (
+		!item ||
+		item.state !== 'quarantined' ||
+		item.walletKey !== record.walletKey ||
+		item.user !== record.user ||
+		item.environment !== record.environment ||
+		item.migrationEpoch !== record.migrationEpoch ||
+		item.id !== record.sourceItemId ||
+		item.revision !== record.sourceItemRevision ||
+		item.sourceBucketKey !== record.sourceBucketKey ||
+		item.quarantineReason !== record.quarantineReason ||
+		item.cocoOperationId !== record.cocoOperationId
+	) {
+		fail('COORDINATOR_STORAGE_FAILURE', 'Quarantine recovery provenance does not match its source item')
+	}
+}
+
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {
 	return new Promise((resolve, reject) => {
 		request.onsuccess = () => resolve(request.result)
@@ -387,7 +522,7 @@ export class IndexedDbMigrationCoordinatorStore implements MigrationDispatchFenc
 					rejectOpen('Migration authority database could not be opened')
 					return
 				}
-				request.onupgradeneeded = () => {
+				request.onupgradeneeded = (event) => {
 					const database = request.result
 					if (!database.objectStoreNames.contains(AUTHORITY_STORE)) {
 						database.createObjectStore(AUTHORITY_STORE, { keyPath: 'walletKey' })
@@ -395,6 +530,38 @@ export class IndexedDbMigrationCoordinatorStore implements MigrationDispatchFenc
 					if (!database.objectStoreNames.contains(MIGRATION_ITEM_STORE)) {
 						database.createObjectStore(MIGRATION_ITEM_STORE, { keyPath: ['walletKey', 'id'] })
 					}
+					if (!database.objectStoreNames.contains(QUARANTINE_RECOVERY_STORE)) {
+						database.createObjectStore(QUARANTINE_RECOVERY_STORE, { keyPath: ['walletKey', 'sourceItemId'] })
+					}
+					if (!database.objectStoreNames.contains(MIGRATION_INVENTORY_STORE)) {
+						database.createObjectStore(MIGRATION_INVENTORY_STORE, { keyPath: ['walletKey', 'migrationEpoch'] })
+					}
+					if (!database.objectStoreNames.contains(MIGRATION_INVENTORY_ENTRY_STORE)) {
+						database.createObjectStore(MIGRATION_INVENTORY_ENTRY_STORE, {
+							keyPath: ['walletKey', 'migrationEpoch', 'id'],
+						})
+					}
+					const transaction = request.transaction
+					if (!transaction) {
+						rejectOpen('Migration authority database upgrade transaction is unavailable')
+						return
+					}
+					if (event.oldVersion >= 2) return
+					const cursorRequest = transaction.objectStore(MIGRATION_ITEM_STORE).openCursor()
+					cursorRequest.onsuccess = () => {
+						const cursor = cursorRequest.result
+						if (!cursor) return
+						try {
+							const item = storedItem(cursor.value)
+							if (item.state === 'quarantined') {
+								transaction.objectStore(QUARANTINE_RECOVERY_STORE).add(quarantineRecoveryRecord(item))
+							}
+							cursor.continue()
+						} catch {
+							transaction.abort()
+						}
+					}
+					cursorRequest.onerror = () => transaction.abort()
 				}
 				request.onsuccess = () => {
 					const database = request.result
@@ -422,7 +589,7 @@ export class IndexedDbMigrationCoordinatorStore implements MigrationDispatchFenc
 	async #run<T>(stores: readonly string[], mode: IDBTransactionMode, work: (transaction: IDBTransaction) => Promise<T>): Promise<T> {
 		try {
 			const database = await this.#open()
-			const transaction = database.transaction(stores, mode)
+			const transaction = database.transaction([...stores], mode)
 			const complete = transactionComplete(transaction)
 			try {
 				const result = await work(transaction)
@@ -451,6 +618,18 @@ export class IndexedDbMigrationCoordinatorStore implements MigrationDispatchFenc
 		return transaction.objectStore(MIGRATION_ITEM_STORE)
 	}
 
+	#recoveryStore(transaction: IDBTransaction): IDBObjectStore {
+		return transaction.objectStore(QUARANTINE_RECOVERY_STORE)
+	}
+
+	#inventoryStore(transaction: IDBTransaction): IDBObjectStore {
+		return transaction.objectStore(MIGRATION_INVENTORY_STORE)
+	}
+
+	#inventoryEntryStore(transaction: IDBTransaction): IDBObjectStore {
+		return transaction.objectStore(MIGRATION_INVENTORY_ENTRY_STORE)
+	}
+
 	#requireBoundIdentity(walletKey: string, migrationEpoch: string): void {
 		if (walletKey !== this.#walletKey) fail('BUCKET_OWNERSHIP_MISMATCH', 'Wallet identity does not match this migration database')
 		if (migrationEpoch !== this.#migrationEpoch) fail('WRONG_EPOCH', 'Migration command belongs to another epoch')
@@ -474,6 +653,46 @@ export class IndexedDbMigrationCoordinatorStore implements MigrationDispatchFenc
 		this.#requireBoundIdentity(item.walletKey, migrationEpoch)
 		if (item.migrationEpoch !== migrationEpoch) fail('WRONG_EPOCH', 'Migration item belongs to another epoch')
 		return item
+	}
+
+	async #loadInventory(transaction: IDBTransaction, migrationEpoch: string): Promise<MigrationInventoryHeader> {
+		await this.#loadAuthority(transaction, migrationEpoch)
+		const value = await requestResult(this.#inventoryStore(transaction).get([this.#walletKey, migrationEpoch]))
+		if (value === undefined) fail('COORDINATOR_RECORD_NOT_FOUND', 'Migration inventory was not found')
+		try {
+			const inventory = parseStoredInventoryHeader(value)
+			this.#requireBoundIdentity(inventory.walletKey, migrationEpoch)
+			if (inventory.user !== this.#user || inventory.environment !== this.#environment || inventory.migrationEpoch !== migrationEpoch) {
+				fail('COORDINATOR_STORAGE_FAILURE', 'Migration inventory identity is inconsistent')
+			}
+			return inventory
+		} catch (error) {
+			if (error instanceof CocoHostError && error.code === 'COORDINATOR_STORAGE_FAILURE') throw error
+			storageFailure()
+		}
+	}
+
+	async #loadInventoryEntries(transaction: IDBTransaction, inventory: MigrationInventoryHeader): Promise<MigrationInventoryEntry[]> {
+		try {
+			const values = await requestResult(this.#inventoryEntryStore(transaction).getAll())
+			const entries = values.map((value) => parseStoredInventoryEntry(value))
+			if (
+				entries.some(
+					(entry) =>
+						entry.walletKey !== inventory.walletKey ||
+						entry.user !== inventory.user ||
+						entry.environment !== inventory.environment ||
+						entry.migrationEpoch !== inventory.migrationEpoch,
+				)
+			) {
+				fail('COORDINATOR_STORAGE_FAILURE', 'Migration inventory entry belongs to another identity')
+			}
+			assertInventoryEntriesCoherent(inventory, entries)
+			return entries
+		} catch (error) {
+			if (error instanceof CocoHostError && error.code === 'COORDINATOR_STORAGE_FAILURE') throw error
+			storageFailure()
+		}
 	}
 
 	#captureAuthorityQuery(input: unknown): { walletKey: string; migrationEpoch: string } {
@@ -526,6 +745,192 @@ export class IndexedDbMigrationCoordinatorStore implements MigrationDispatchFenc
 		})
 	}
 
+	async createMigrationInventory(command: unknown): Promise<DomainCreationResult<MigrationInventoryHeader>> {
+		const { migrationEpoch } = this.#captureAuthorityQuery(command)
+		return this.#run([AUTHORITY_STORE, MIGRATION_INVENTORY_STORE], 'readwrite', async (transaction) => {
+			const authority = await this.#loadAuthority(transaction, migrationEpoch)
+			if (authority.phase !== 'legacy-active') fail('INVALID_TRANSITION', 'Migration inventory must begin before snapshot freeze')
+			const store = this.#inventoryStore(transaction)
+			const existing = await requestResult(store.get([this.#walletKey, migrationEpoch]))
+			if (existing !== undefined) {
+				const inventory = parseStoredInventoryHeader(existing)
+				if (
+					inventory.walletKey !== this.#walletKey ||
+					inventory.user !== this.#user ||
+					inventory.environment !== this.#environment ||
+					inventory.migrationEpoch !== migrationEpoch
+				) {
+					fail('COORDINATOR_STORAGE_FAILURE', 'Migration inventory identity is inconsistent')
+				}
+				return Object.freeze({ created: false, value: inventoryProjection(inventory) })
+			}
+			const inventory = createBuildingInventory(authority)
+			await requestResult(store.add(inventory))
+			return Object.freeze({ created: true, value: inventoryProjection(inventory) })
+		})
+	}
+
+	async loadMigrationInventory(query: unknown): Promise<Readonly<MigrationInventoryHeader>> {
+		const { migrationEpoch } = this.#captureAuthorityQuery(query)
+		return this.#run([AUTHORITY_STORE, MIGRATION_INVENTORY_STORE], 'readonly', async (transaction) =>
+			inventoryProjection(await this.#loadInventory(transaction, migrationEpoch)),
+		)
+	}
+
+	async listMigrationInventoryEntries(query: unknown): Promise<readonly Readonly<MigrationInventoryEntry>[]> {
+		const { migrationEpoch } = this.#captureAuthorityQuery(query)
+		return this.#run([AUTHORITY_STORE, MIGRATION_INVENTORY_STORE, MIGRATION_INVENTORY_ENTRY_STORE], 'readonly', async (transaction) => {
+			const inventory = await this.#loadInventory(transaction, migrationEpoch)
+			return Object.freeze(
+				(await this.#loadInventoryEntries(transaction, inventory))
+					.map(inventoryEntryProjection)
+					.sort((left, right) => left.id.localeCompare(right.id)),
+			)
+		})
+	}
+
+	async discoverMigrationInventoryEntry(command: unknown): Promise<MigrationInventoryEntryDiscoveryResult> {
+		const captured = captureObject(
+			command,
+			['walletKey', 'migrationEpoch', 'expectedInventoryRevision', 'entry'],
+			'INVALID_TRANSITION',
+			'Inventory discovery command',
+		)
+		const walletKey = parseCocoWalletNamespace(captured.walletKey).namespace
+		const migrationEpoch = requireEpoch(captured.migrationEpoch)
+		this.#requireBoundIdentity(walletKey, migrationEpoch)
+		return this.#run(
+			[AUTHORITY_STORE, MIGRATION_ITEM_STORE, QUARANTINE_RECOVERY_STORE, MIGRATION_INVENTORY_STORE, MIGRATION_INVENTORY_ENTRY_STORE],
+			'readwrite',
+			async (transaction) => {
+				const inventory = await this.#loadInventory(transaction, migrationEpoch)
+				if (inventory.revision !== requireInventoryRevision(captured.expectedInventoryRevision)) {
+					fail('STALE_REVISION', 'Observed migration inventory revision is not current')
+				}
+				const entries = await this.#loadInventoryEntries(transaction, inventory)
+				const result = discoverInventoryEntry(inventory, entries, captured.entry)
+				if (result.outcome === 'recorded') {
+					const items = (await requestResult(this.#itemStore(transaction).getAll())).map(storedItem)
+					const handoffs = (await requestResult(this.#recoveryStore(transaction).getAll())).map(storedRecovery)
+					assertInventoryDispositionReferences(result.entry, items, handoffs)
+				}
+				await requestResult(this.#inventoryStore(transaction).put(result.inventory))
+				if (result.outcome === 'recorded') await requestResult(this.#inventoryEntryStore(transaction).add(result.entry))
+				return result
+			},
+		)
+	}
+
+	async completeMigrationInventorySource(command: unknown): Promise<Readonly<MigrationInventoryHeader>> {
+		const captured = captureObject(
+			command,
+			['walletKey', 'migrationEpoch', 'expectedInventoryRevision', 'completion'],
+			'INVALID_TRANSITION',
+			'Inventory source completion command',
+		)
+		const walletKey = parseCocoWalletNamespace(captured.walletKey).namespace
+		const migrationEpoch = requireEpoch(captured.migrationEpoch)
+		this.#requireBoundIdentity(walletKey, migrationEpoch)
+		return this.#run([AUTHORITY_STORE, MIGRATION_INVENTORY_STORE], 'readwrite', async (transaction) => {
+			const inventory = await this.#loadInventory(transaction, migrationEpoch)
+			if (inventory.revision !== requireInventoryRevision(captured.expectedInventoryRevision)) {
+				fail('STALE_REVISION', 'Observed migration inventory revision is not current')
+			}
+			const next = completeInventorySource(inventory, captured.completion)
+			await requestResult(this.#inventoryStore(transaction).put(next))
+			return inventoryProjection(next)
+		})
+	}
+
+	async sealInventoryAndFreezeSnapshot(command: unknown): Promise<Readonly<MigrationInventorySealResult>> {
+		const captured = captureObject(
+			command,
+			['walletKey', 'migrationEpoch', 'expectedAuthorityRevision', 'expectedInventoryRevision'],
+			'INVALID_TRANSITION',
+			'Inventory seal command',
+		)
+		const walletKey = parseCocoWalletNamespace(captured.walletKey).namespace
+		const migrationEpoch = requireEpoch(captured.migrationEpoch)
+		this.#requireBoundIdentity(walletKey, migrationEpoch)
+		return this.#run(
+			[AUTHORITY_STORE, MIGRATION_ITEM_STORE, QUARANTINE_RECOVERY_STORE, MIGRATION_INVENTORY_STORE, MIGRATION_INVENTORY_ENTRY_STORE],
+			'readwrite',
+			async (transaction) => {
+				const authority = await this.#loadAuthority(transaction, migrationEpoch)
+				const inventory = await this.#loadInventory(transaction, migrationEpoch)
+				if (authority.revision !== requireRevision(captured.expectedAuthorityRevision)) {
+					fail('STALE_REVISION', 'Observed authority revision is not current')
+				}
+				if (inventory.revision !== requireInventoryRevision(captured.expectedInventoryRevision)) {
+					fail('STALE_REVISION', 'Observed migration inventory revision is not current')
+				}
+				if (authority.phase !== 'legacy-active') fail('INVALID_TRANSITION', 'Migration snapshot can only freeze from legacy-active')
+				const entries = await this.#loadInventoryEntries(transaction, inventory)
+				const items = (await requestResult(this.#itemStore(transaction).getAll())).map(storedItem)
+				const handoffs = (await requestResult(this.#recoveryStore(transaction).getAll())).map(storedRecovery)
+				for (const entry of entries) assertInventoryDispositionReferences(entry, items, handoffs)
+				const sealed = sealInventory(inventory, entries, authority.revision, items)
+				const nextAuthority: AuthorityRecord = {
+					...authority,
+					phase: 'migration-snapshot-frozen',
+					revision: authority.revision + 1,
+				}
+				await requestResult(this.#inventoryStore(transaction).put(sealed))
+				await requestResult(this.#authorityStore(transaction).put(nextAuthority))
+				return Object.freeze({ authority: authorityProjection(nextAuthority), inventory: inventoryProjection(sealed) })
+			},
+		)
+	}
+
+	async updateMigrationInventoryDisposition(command: unknown): Promise<Readonly<MigrationInventoryEntry>> {
+		const captured = captureObject(
+			command,
+			['walletKey', 'migrationEpoch', 'expectedInventoryRevision', 'entryId', 'expectedDispositionRevision', 'disposition'],
+			'INVALID_TRANSITION',
+			'Inventory disposition command',
+		)
+		const walletKey = parseCocoWalletNamespace(captured.walletKey).namespace
+		const migrationEpoch = requireEpoch(captured.migrationEpoch)
+		const entryId = requireSafeId(captured.entryId, 'inventory entry id')
+		this.#requireBoundIdentity(walletKey, migrationEpoch)
+		return this.#run(
+			[AUTHORITY_STORE, MIGRATION_ITEM_STORE, QUARANTINE_RECOVERY_STORE, MIGRATION_INVENTORY_STORE, MIGRATION_INVENTORY_ENTRY_STORE],
+			'readwrite',
+			async (transaction) => {
+				const inventory = await this.#loadInventory(transaction, migrationEpoch)
+				if (inventory.revision !== requireInventoryRevision(captured.expectedInventoryRevision)) {
+					fail('STALE_REVISION', 'Observed migration inventory revision is not current')
+				}
+				const entries = await this.#loadInventoryEntries(transaction, inventory)
+				const entry = entries.find((candidate) => candidate.id === entryId)
+				if (!entry) fail('COORDINATOR_RECORD_NOT_FOUND', 'Migration inventory entry was not found')
+				if (entry.kind !== 'migration-claim') fail('INVALID_TRANSITION', 'Coco opening baseline has no migration disposition')
+				if (entry.disposition.revision !== requireInventoryRevision(captured.expectedDispositionRevision)) {
+					fail('STALE_REVISION', 'Observed inventory disposition revision is not current')
+				}
+				const next = updateInventoryEntryDisposition(inventory, entry, captured.disposition)
+				const items = (await requestResult(this.#itemStore(transaction).getAll())).map(storedItem)
+				const handoffs = (await requestResult(this.#recoveryStore(transaction).getAll())).map(storedRecovery)
+				assertInventoryDispositionReferences(next.entry, items, handoffs)
+				assertInventoryEntriesCoherent(
+					next.inventory,
+					entries.map((candidate) => (candidate.id === entryId ? next.entry : candidate)),
+				)
+				await requestResult(this.#inventoryStore(transaction).put(next.inventory))
+				await requestResult(this.#inventoryEntryStore(transaction).put(next.entry))
+				return inventoryEntryProjection(next.entry)
+			},
+		)
+	}
+
+	async migrationInventoryAccounting(query: unknown): Promise<readonly Readonly<MigrationAccountingReport>[]> {
+		const { migrationEpoch } = this.#captureAuthorityQuery(query)
+		return this.#run([AUTHORITY_STORE, MIGRATION_INVENTORY_STORE, MIGRATION_INVENTORY_ENTRY_STORE], 'readonly', async (transaction) => {
+			const inventory = await this.#loadInventory(transaction, migrationEpoch)
+			return projectSealedMigrationInventoryAccounting(inventory, await this.#loadInventoryEntries(transaction, inventory))
+		})
+	}
+
 	async advanceAuthorityPhase(command: unknown): Promise<Readonly<AuthorityStatus>> {
 		const captured = this.#captureVersionedCommand(command, ['nextPhase'])
 		const walletKey = parseCocoWalletNamespace(captured.walletKey).namespace
@@ -535,9 +940,13 @@ export class IndexedDbMigrationCoordinatorStore implements MigrationDispatchFenc
 			const current = await this.#loadAuthority(transaction, migrationEpoch)
 			const expectedRevision = requireRevision(captured.expectedRevision)
 			if (current.revision !== expectedRevision) fail('STALE_REVISION', 'Observed authority revision is not current')
+			const nextPhase = assertLegalAuthorityAdvance(current.phase, captured.nextPhase)
+			if (nextPhase === 'migration-snapshot-frozen') {
+				fail('INVALID_TRANSITION', 'Snapshot freeze requires the atomic migration inventory seal operation')
+			}
 			const next: AuthorityRecord = {
 				...current,
-				phase: assertLegalAuthorityAdvance(current.phase, captured.nextPhase),
+				phase: nextPhase,
 				revision: current.revision + 1,
 			}
 			await requestResult(this.#authorityStore(transaction).put(next))
@@ -613,6 +1022,33 @@ export class IndexedDbMigrationCoordinatorStore implements MigrationDispatchFenc
 		})
 	}
 
+	async listQuarantineRecoveryHandoffs(query: unknown): Promise<readonly Readonly<QuarantineRecoveryRecord>[]> {
+		const { migrationEpoch } = this.#captureAuthorityQuery(query)
+		return this.#run([AUTHORITY_STORE, MIGRATION_ITEM_STORE, QUARANTINE_RECOVERY_STORE], 'readonly', async (transaction) => {
+			await this.#loadAuthority(transaction, migrationEpoch)
+			const items = (await requestResult(this.#itemStore(transaction).getAll())).map(storedItem)
+			const itemById = new Map(items.map((item) => [item.id, item]))
+			const records = (await requestResult(this.#recoveryStore(transaction).getAll())).map(storedRecovery)
+			if (records.some((record) => record.walletKey !== this.#walletKey || record.migrationEpoch !== migrationEpoch)) {
+				fail('COORDINATOR_STORAGE_FAILURE', 'Quarantine recovery record belongs to another wallet or epoch')
+			}
+			const recordByItemId = new Map(records.map((record) => [record.sourceItemId, record]))
+			if (
+				items.some(
+					(item) =>
+						item.walletKey === this.#walletKey &&
+						item.migrationEpoch === migrationEpoch &&
+						item.state === 'quarantined' &&
+						!recordByItemId.has(item.id),
+				)
+			) {
+				fail('COORDINATOR_STORAGE_FAILURE', 'Quarantined migration item is missing its recovery handoff')
+			}
+			for (const record of records) assertRecoveryMatchesItem(record, itemById.get(record.sourceItemId))
+			return Object.freeze(records.map(recoveryProjection).sort((left, right) => left.sourceItemId.localeCompare(right.sourceItemId)))
+		})
+	}
+
 	async createPlannedMigrationItem(command: unknown): Promise<DomainCreationResult<MigrationItemRecord>> {
 		const captured = captureObject(
 			command,
@@ -623,41 +1059,55 @@ export class IndexedDbMigrationCoordinatorStore implements MigrationDispatchFenc
 		const walletKey = parseCocoWalletNamespace(captured.walletKey).namespace
 		const migrationEpoch = requireEpoch(captured.migrationEpoch)
 		this.#requireBoundIdentity(walletKey, migrationEpoch)
-		return this.#run([AUTHORITY_STORE, MIGRATION_ITEM_STORE], 'readwrite', async (transaction) => {
-			const authority = await this.#loadAuthority(transaction, migrationEpoch)
-			if (authority.phase === 'cutover-committed') {
-				fail('INVALID_QUARANTINE_TRANSITION', 'New migration items cannot be created after cutover')
-			}
-			const id = requireSafeId(captured.itemId, 'migration item id')
-			const sourceBucket = createMonetaryBucketIdentity(captured.sourceBucket)
-			if (sourceBucket.user !== authority.user) fail('BUCKET_OWNERSHIP_MISMATCH', 'Migration source belongs to another wallet')
-			if (sourceBucket.kind === 'coco-ordinary')
-				fail('INVALID_QUARANTINE_TRANSITION', 'Coco ordinary value is not a legacy migration source')
-			const sourceBucketKey = monetaryBucketKey(sourceBucket)
-			const store = this.#itemStore(transaction)
-			const existingValue = await requestResult(store.get([walletKey, id]))
-			if (existingValue !== undefined) {
-				const existing = storedItem(existingValue)
-				if (existing.migrationEpoch === migrationEpoch && existing.sourceBucketKey === sourceBucketKey) {
-					return Object.freeze({ created: false, value: itemProjection(existing) })
+		return this.#run(
+			[AUTHORITY_STORE, MIGRATION_ITEM_STORE, MIGRATION_INVENTORY_STORE, MIGRATION_INVENTORY_ENTRY_STORE],
+			'readwrite',
+			async (transaction) => {
+				const authority = await this.#loadAuthority(transaction, migrationEpoch)
+				if (authority.phase === 'cutover-committed') {
+					fail('INVALID_QUARANTINE_TRANSITION', 'New migration items cannot be created after cutover')
 				}
-				fail('COORDINATOR_RECORD_EXISTS', 'Migration item identity already exists with different binding')
-			}
-			const record: MigrationItemRecord = {
-				id,
-				walletKey,
-				user: authority.user,
-				environment: authority.environment,
-				migrationEpoch,
-				sourceBucketKey,
-				mint: canonicalizeMintUrl(sourceBucket.mint),
-				unit: normalizeUnit(sourceBucket.unit),
-				state: 'planned',
-				revision: 0,
-			}
-			await requestResult(store.add(record))
-			return Object.freeze({ created: true, value: itemProjection(record) })
-		})
+				const id = requireSafeId(captured.itemId, 'migration item id')
+				const sourceBucket = createMonetaryBucketIdentity(captured.sourceBucket)
+				if (sourceBucket.user !== authority.user) fail('BUCKET_OWNERSHIP_MISMATCH', 'Migration source belongs to another wallet')
+				if (sourceBucket.kind === 'coco-ordinary')
+					fail('INVALID_QUARANTINE_TRANSITION', 'Coco ordinary value is not a legacy migration source')
+				const sourceBucketKey = monetaryBucketKey(sourceBucket)
+				const store = this.#itemStore(transaction)
+				const existingValue = await requestResult(store.get([walletKey, id]))
+				if (existingValue !== undefined) {
+					const existing = storedItem(existingValue)
+					if (existing.migrationEpoch === migrationEpoch && existing.sourceBucketKey === sourceBucketKey) {
+						return Object.freeze({ created: false, value: itemProjection(existing) })
+					}
+					fail('COORDINATOR_RECORD_EXISTS', 'Migration item identity already exists with different binding')
+				}
+				const record: MigrationItemRecord = {
+					id,
+					walletKey,
+					user: authority.user,
+					environment: authority.environment,
+					migrationEpoch,
+					sourceBucketKey,
+					mint: canonicalizeMintUrl(sourceBucket.mint),
+					unit: normalizeUnit(sourceBucket.unit),
+					state: 'planned',
+					revision: 0,
+				}
+				const inventoryValue = await requestResult(this.#inventoryStore(transaction).get([walletKey, migrationEpoch]))
+				if (inventoryValue !== undefined) {
+					const inventory = parseStoredInventoryHeader(inventoryValue)
+					if (inventory.status === 'sealed') {
+						const entries = await this.#loadInventoryEntries(transaction, inventory)
+						if (!inventoryHasMigrationItem(entries, record)) {
+							await requestResult(this.#inventoryStore(transaction).put(invalidateInventory(inventory, `migration-item:${id}`)))
+						}
+					}
+				}
+				await requestResult(store.add(record))
+				return Object.freeze({ created: true, value: itemProjection(record) })
+			},
+		)
 	}
 
 	async bindCocoOperationOnce(command: unknown): Promise<Readonly<MigrationItemRecord>> {
@@ -708,7 +1158,7 @@ export class IndexedDbMigrationCoordinatorStore implements MigrationDispatchFenc
 		const migrationEpoch = requireEpoch(captured.migrationEpoch)
 		const itemId = requireSafeId(captured.itemId, 'itemId')
 		this.#requireBoundIdentity(walletKey, migrationEpoch)
-		return this.#run([AUTHORITY_STORE, MIGRATION_ITEM_STORE], 'readwrite', async (transaction) => {
+		return this.#run([AUTHORITY_STORE, MIGRATION_ITEM_STORE, QUARANTINE_RECOVERY_STORE], 'readwrite', async (transaction) => {
 			const item = await this.#loadItem(transaction, migrationEpoch, itemId)
 			const expectedRevision = requireRevision(captured.expectedRevision)
 			if (item.revision !== expectedRevision) fail('STALE_REVISION', 'Observed migration item revision is not current')
@@ -722,7 +1172,9 @@ export class IndexedDbMigrationCoordinatorStore implements MigrationDispatchFenc
 				quarantineReason: reason,
 				revision: item.revision + 1,
 			}
+			const handoff = quarantineRecoveryRecord(next)
 			await requestResult(this.#itemStore(transaction).put(next))
+			await requestResult(this.#recoveryStore(transaction).add(handoff))
 			return itemProjection(next)
 		})
 	}

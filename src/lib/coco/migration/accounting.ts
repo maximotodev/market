@@ -1,20 +1,21 @@
 import { captureArray, captureObject, fail } from '../errors'
 import { normalizeNostrPubkey } from '../namespace'
+import {
+	assertInventoryEntriesCoherent,
+	sourceCategoryForInventoryEntry,
+	type MigrationDestinationDisposition,
+	type MigrationInventoryEntry,
+	type MigrationInventoryHeader,
+	type MigrationSourceCategory,
+} from './inventory'
 import { canonicalizeMintUrl, normalizeUnit, type CanonicalMintUrl } from './types'
 
-export type MigrationSourceCategory = 'legacy-ready' | 'legacy-locked' | 'legacy-unresolved' | 'legacy-pending-outbound'
-
-export type MigrationDestinationDisposition =
-	| 'coco-ready'
-	| 'coco-reserved'
-	| 'retained-legacy-workflow'
-	| 'quarantined'
-	| 'verified-consumed-external'
+export type { MigrationDestinationDisposition, MigrationSourceCategory } from './inventory'
 
 /**
- * Arithmetic input only. A claim ID is not proof-of-value authority; I1B must
- * load claims from a sealed protected inventory before this checker is used for
- * an authoritative migration decision.
+ * Arithmetic input only. A claim ID is not proof-of-value authority. Future
+ * authoritative decisions must use the durable sealed-inventory projection
+ * rather than accept independently supplied claims.
  */
 export interface MigrationAccountingClaim {
 	claimId: string
@@ -289,4 +290,67 @@ export function checkIndependentMigrationAccounting(value: unknown): readonly Re
 		}
 	}
 	return Object.freeze(inventories.map(reportForInventory))
+}
+
+/**
+ * Projects arithmetic only from a sealed durable inventory. Disposition labels
+ * remain accounting classifications and do not prove an executable owner or
+ * authorize cutover.
+ */
+export function projectSealedMigrationInventoryAccounting(
+	header: Readonly<MigrationInventoryHeader>,
+	entries: readonly Readonly<MigrationInventoryEntry>[],
+): readonly Readonly<MigrationAccountingReport>[] {
+	if (header.status !== 'sealed' || header.sealedEntryCount !== entries.length) {
+		fail('ACCOUNTING_INPUT_INVALID', 'Accounting requires one complete sealed migration inventory')
+	}
+	assertInventoryEntriesCoherent(header, entries)
+	const grouped = new Map<
+		string,
+		{
+			migrationEpoch: string
+			user: string
+			mint: CanonicalMintUrl
+			unit: string
+			openingCocoBaseline: CocoOpeningBaseline | null
+			claims: MigrationAccountingClaim[]
+		}
+	>()
+	for (const entry of entries) {
+		const key = JSON.stringify([entry.mint, entry.unit])
+		const inventory = grouped.get(key) ?? {
+			migrationEpoch: header.migrationEpoch,
+			user: header.user,
+			mint: entry.mint,
+			unit: entry.unit,
+			openingCocoBaseline: null,
+			claims: [],
+		}
+		if (entry.kind === 'coco-opening-baseline') {
+			if (inventory.openingCocoBaseline) fail('ACCOUNTING_INPUT_INVALID', 'Inventory has duplicate Coco opening baselines')
+			inventory.openingCocoBaseline = {
+				baselineId: entry.id,
+				migrationEpoch: entry.migrationEpoch,
+				user: entry.user,
+				mint: entry.mint,
+				unit: entry.unit,
+				amount: entry.amount,
+			}
+		} else {
+			inventory.claims.push({
+				claimId: entry.id,
+				migrationEpoch: entry.migrationEpoch,
+				user: entry.user,
+				mint: entry.mint,
+				unit: entry.unit,
+				sourceAmount: entry.amount,
+				sourceCategory: sourceCategoryForInventoryEntry(entry),
+				destinationDisposition: entry.disposition.destinationDisposition,
+				destinationAmount: entry.disposition.destinationAmount,
+				verifiedProtocolFee: entry.disposition.verifiedProtocolFee,
+			})
+		}
+		grouped.set(key, inventory)
+	}
+	return checkIndependentMigrationAccounting([...grouped.values()])
 }
