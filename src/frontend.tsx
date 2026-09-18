@@ -9,6 +9,11 @@ import type { AppRouterContext } from './lib/router-utils'
 import { bootApp, bootStore } from './lib/boot'
 import { UpdateAvailableDialog } from './components/UpdateAvailableDialog'
 import { useServiceWorker } from './hooks/useServiceWorker'
+import { installCocoAuctionDemoBridge } from './lib/coco/auctionDemo/browserBridge'
+import { installCocoFundingSmokeBridge } from './lib/coco/auctionDemo/fundingSmokeBridge'
+
+installCocoAuctionDemoBridge()
+installCocoFundingSmokeBridge()
 
 if (process.env.NODE_ENV !== 'development') {
 	console.log = () => {}

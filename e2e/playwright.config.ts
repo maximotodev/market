@@ -69,6 +69,8 @@ export default defineConfig({
 						LOCAL_RELAY_ONLY: 'true',
 						NIP46_RELAY_URL: RELAY_URL,
 						APP_DEV_TEST_MINT_URL: 'http://localhost:3338',
+						APP_AUCTION_MONETARY_MODE: process.env.APP_AUCTION_MONETARY_MODE ?? 'legacy',
+						BUN_PUBLIC_AUCTION_MONETARY_MODE: process.env.APP_AUCTION_MONETARY_MODE ?? 'legacy',
 					},
 				},
 			],

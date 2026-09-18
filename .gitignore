@@ -1,5 +1,6 @@
 # dependencies (bun install)
 node_modules
+.local-tools/
 
 # playwright
 playwright-report
@@ -9,6 +10,10 @@ test-results
 out
 dist
 *.tgz
+!vendor/coco-runtime-190b25b0/packages/core/dist/
+!vendor/coco-runtime-190b25b0/packages/core/dist/**
+!vendor/coco-runtime-190b25b0/packages/indexeddb/dist/
+!vendor/coco-runtime-190b25b0/packages/indexeddb/dist/**
 
 # code coverage
 coverage

@@ -43,6 +43,7 @@ import NDK, { NDKEvent, NDKRelaySet, NDKUser, type NDKFilter, type NDKSigner, ty
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { v4 as uuidv4 } from 'uuid'
+import { recordLegacyAuctionMonetaryCall } from '@/lib/coco/auctionDemo/legacyAudit'
 
 export interface AuctionSpecEntry {
 	key: string
@@ -235,6 +236,7 @@ const tagBidError = (step: string, cause: unknown): Error => {
 }
 
 export const createAuctionEvent = async (formData: AuctionFormData, signer: NDKSigner, ndk: NDK, auctionId?: string): Promise<NDKEvent> => {
+	recordLegacyAuctionMonetaryCall('nip60-initialize')
 	const validated = validateAuctionPublishInput(formData, { minDurationSeconds: AUCTION_MIN_DURATION_SECONDS })
 	const event = new NDKEvent(ndk)
 	event.kind = 30408
@@ -460,6 +462,7 @@ const resolveLatestActiveBidByBidder = (bids: NDKEvent[], bidderPubkey: string):
  * Returns the published bid event id.
  */
 export const publishAuctionBid = async (formData: AuctionBidFormData, signer: NDKSigner, ndk: NDK): Promise<string> => {
+	recordLegacyAuctionMonetaryCall('nip60-lock')
 	if (!formData.auctionEventId) throw new Error('Auction event id is required')
 	if (!formData.auctionCoordinates) throw new Error('Auction coordinates are required')
 	if (!formData.sellerPubkey) throw new Error('Seller pubkey is required')
@@ -1196,6 +1199,7 @@ export const publishBidderPathRelease = async (
 	signer: NDKSigner,
 	ndk: NDK,
 ): Promise<PublishBidderPathReleaseResult> => {
+	recordLegacyAuctionMonetaryCall('nip60-lock')
 	if (!input.bidEventId) throw new Error('bidEventId is required')
 
 	// Walk the rebid chain. For a single-leg bid this returns one
@@ -1426,6 +1430,7 @@ export const useRepublishAuctionBidMutation = () => {
 // won, here's the path / I have a path, redeem".
 
 export const publishAuctionSettlement = async (formData: AuctionSettlementFormData, signer: NDKSigner, ndk: NDK): Promise<string> => {
+	recordLegacyAuctionMonetaryCall('nip60-receive')
 	if (!formData.auctionEventId) throw new Error('Auction event id is required')
 
 	// Lazy imports to avoid pulling settlement-only deps into the bid

@@ -1,0 +1,485 @@
+# @cashu/coco-core
+
+Modular, storage-agnostic core for working with Cashu mints and wallets.
+
+- **Storage-agnostic**: Repositories are interfaces; bring your own persistence.
+- **Typed Event Bus**: Subscribe to mint, proof, quote, and counter events with strong types.
+- **High-level APIs**: `MintApi`, `WalletApi`, `AuthApi`, `PaymentRequestsApi`,
+  `QuoteApi`, `HistoryApi`, `KeyRingApi`, and `manager.ops.*` for common flows.
+- **Background watchers**: Optional services to track quote/payment and proof states.
+
+## Install
+
+```bash
+npm install @cashu/coco-core
+```
+
+For a real application you will usually install a storage adapter alongside the
+core package, for example `@cashu/coco-sqlite`, `@cashu/coco-indexeddb`, or
+`@cashu/coco-expo-sqlite`. Bun applications can use `@cashu/coco-sqlite-bun`.
+
+## Entry points
+
+`@cashu/coco-core` publishes three stable import surfaces. Pick the narrowest
+one that matches what you are building:
+
+```ts
+// App and React usage
+import { initializeCoco, Amount, type Manager } from '@cashu/coco-core';
+
+// Storage adapter implementations and adapter contract tests
+import { type Repositories, serializeAmount } from '@cashu/coco-core/adapter';
+
+// Plugin authors
+import type { Plugin, PluginExtensions } from '@cashu/coco-core/plugin';
+```
+
+- Use the package root for app-facing wallet setup, manager APIs, public models,
+  errors, amount helpers, events, logging, and config boundary types.
+- Use `@cashu/coco-core/adapter` when you are writing persistence adapters or
+  adapter contract tests. Repository contracts, persisted operation/domain
+  shapes, and serialization helpers live there.
+- Use `@cashu/coco-core/plugin` when you are writing extensions. Plugin
+  lifecycle types, extension augmentation types, plugin service keys, and plugin
+  errors live there.
+
+Concrete services, operation service classes, handler providers, transport
+internals, `PluginHost`, and individual memory repository classes are
+implementation details. They are not app-facing root API.
+
+## Protocol Support
+
+- [x] NUT-00
+- [x] NUT-01
+- [x] NUT-02
+- [x] NUT-03
+- [x] NUT-04
+- [x] NUT-05
+- [x] NUT-06
+- [x] NUT-07
+- [x] NUT-08
+- [x] NUT-09
+- [x] NUT-10
+- [x] NUT-11
+- [x] NUT-12
+- [x] NUT-13
+- [ ] NUT-14
+- [ ] NUT-15
+- [ ] NUT-16
+- [x] NUT-17
+- [x] NUT-18
+- [ ] NUT-19
+- [ ] NUT-20
+- [x] NUT-21
+- [x] NUT-22
+- [x] NUT-23
+- [ ] NUT-24
+- [ ] NUT-25
+
+## Quick start
+
+```ts
+import { initializeCoco, MemoryRepositories, ConsoleLogger } from '@cashu/coco-core';
+
+// Provide a deterministic 64-byte seed for wallet key derivation
+const seedGetter = async () => seed;
+
+const repos = new MemoryRepositories();
+const logger = new ConsoleLogger('example', { level: 'info' });
+
+const manager = await initializeCoco({
+  repo: repos,
+  seedGetter,
+  logger,
+});
+
+// Subscribe to events (typed)
+const unsubscribe = manager.on('counter:updated', (c) => {
+  console.log('counter updated', c);
+});
+
+// Register a mint
+await manager.mint.addMint('https://nofees.testnut.cashu.space');
+
+// Create a mint quote, prepare an operation, pay externally, then redeem
+const quote = await manager.quotes.mint.create({
+  mintUrl: 'https://nofees.testnut.cashu.space',
+  amount: 100,
+  method: 'bolt11',
+});
+
+const pendingMint = await manager.ops.mint.prepare({
+  quote,
+  amount: 100,
+});
+
+const completed = new Promise<void>((resolve, reject) => {
+  let offFinalized = () => {};
+  let offFailed = () => {};
+  const cleanup = () => {
+    offFinalized();
+    offFailed();
+  };
+
+  offFinalized = manager.on('mint-op:finalized', ({ operationId }) => {
+    if (operationId !== pendingMint.id) return;
+    cleanup();
+    resolve();
+  });
+  offFailed = manager.on('mint-op:failed', ({ operationId, operation }) => {
+    if (operationId !== pendingMint.id) return;
+    cleanup();
+    reject(new Error(operation.terminalFailure?.reason ?? operation.error ?? 'Mint failed'));
+  });
+});
+
+// pay pendingMint.request externally; default processors finalize after payment
+await completed;
+
+// Check balances
+const balances = await manager.wallet.balances.byMint();
+const total = await manager.wallet.balances.total();
+console.log('balances', balances);
+console.log('wallet total', total.total);
+
+// Inspect spendable vs reserved funds explicitly when needed
+console.log('spendable balance', balances['https://nofees.testnut.cashu.space']?.spendable ?? 0);
+console.log('reserved balance', balances['https://nofees.testnut.cashu.space']?.reserved ?? 0);
+```
+
+### Watchers & processors (optional)
+
+Start background watchers or processors to automatically react to changes:
+
+```ts
+// Watch mint operation quote updates on startup and while running (default true)
+await manager.enableMintOperationWatcher({ watchExistingPendingOnStart: true });
+
+// Process queued mint operations from live events (auto-enabled by initializeCoco)
+await manager.enableMintOperationProcessor({ processIntervalMs: 3000 });
+
+// Watch canonical melt quote updates and settle pending melt operations
+await manager.enableMeltQuoteWatcher();
+await manager.enableMeltSettlementProcessor();
+
+// Watch proof state updates (e.g., to move inflight proofs to spent)
+await manager.enableProofStateWatcher();
+
+// Later, you can stop them
+await manager.disableMintOperationWatcher();
+await manager.disableMintOperationProcessor();
+await manager.disableMeltQuoteWatcher();
+await manager.disableMeltSettlementProcessor();
+await manager.disableProofStateWatcher();
+```
+
+### initializeCoco options
+
+`initializeCoco` sets up repositories, plugins, watchers, and processors for you. You can configure it via `CocoConfig`:
+
+- `repo`: `Repositories` implementation (required)
+- `seedGetter`: async seed provider (required)
+- `logger`: optional logger (defaults to `NullLogger`)
+- `webSocketFactory`: optional WebSocket factory
+- `plugins`: optional plugin list
+- `watchers`: enable/disable watcher services (`mintOperationWatcher`, `meltQuoteWatcher`,
+  `proofStateWatcher`)
+- `processors`: enable/disable processors (`mintOperationProcessor`, `meltSettlementProcessor`)
+  and tune intervals
+- `subscriptions`: polling intervals for hybrid WebSocket + polling (`slowPollingIntervalMs`, `fastPollingIntervalMs`)
+
+If you prefer manual wiring, construct `Manager` directly and call `initPlugins()` before enabling watchers/processors.
+
+## Architecture
+
+- `Manager` is the app-facing facade. It exposes `mint`, `wallet`, `auth`,
+  `quotes`, `paymentRequests`, `ops`, `history`, and `keyring` APIs plus watcher
+  and processor helpers.
+- `initializeCoco` wires the manager from a `CocoConfig`, including
+  repositories, seed access, logging, subscriptions, plugins, watchers, and
+  processors.
+- `manager.ops.*` is the supported surface for recoverable send, receive, mint,
+  and melt lifecycles.
+- `manager.quotes.mint` and `manager.quotes.melt` expose canonical quote lookup,
+  creation, and refresh workflows.
+- `manager.on(...)` exposes typed `CoreEvents`, including subscription,
+  operation, proof, quote, history, mint, and auth-session events.
+
+### Storage
+
+Initialize Coco with the built-in storage adapter for your runtime. The package root also exports
+`MemoryRepositories` for in-memory tests and examples. See [Storage Adapters](../docs/pages/storage-adapters.md)
+for setup and storage-security guidance.
+
+## Public API surface
+
+### Manager
+
+- `mint`, `wallet`, `auth`, `quotes`, `paymentRequests`, `ops`, `history`, and
+  `keyring`
+- `ext: PluginExtensions` from `@cashu/coco-core/plugin`
+- `on/once/off` for `CoreEvents`
+- `enableMintOperationWatcher()`, `disableMintOperationWatcher()`
+- `enableMintOperationProcessor()`, `disableMintOperationProcessor()`,
+  `waitForMintOperationProcessor()`
+- `enableMeltQuoteWatcher()`, `disableMeltQuoteWatcher()`
+- `enableMeltSettlementProcessor()`, `disableMeltSettlementProcessor()`
+- `enableProofStateWatcher()`, `disableProofStateWatcher()`
+- `pauseSubscriptions()`, `resumeSubscriptions()`
+- `use(plugin: Plugin): void` with `Plugin` from `@cashu/coco-core/plugin`
+- `initPlugins(): Promise<void>`
+- `dispose(): Promise<void>`
+
+### OpsApi
+
+- `send`: `prepare`, `execute`, `get`, `listPrepared`, `listInFlight`,
+  `refresh`, `cancel`, `reclaim`, plus `recovery` and `diagnostics`
+- `receive`: `prepare`, `execute`, `get`, `listPrepared`, `listInFlight`,
+  `refresh`, `cancel`, plus `recovery` and `diagnostics`
+- `mint`: `prepare`, `execute`, `get`, `listByQuote`,
+  `listPending`, `listInFlight`, `checkPayment`, `refresh`, `finalize`, plus
+  `recovery` and `diagnostics`. Built-in methods: `bolt11`, `onchain`,
+  `bolt12`.
+- `melt`: `prepare`, `execute`, `get`, `getByQuote`, `listByQuote`,
+  `listPrepared`, `listInFlight`, `refresh`, `cancel`, `reclaim`, `finalize`,
+  plus `recovery` and `diagnostics`. Built-in methods: `bolt11`, `bolt12`,
+  `onchain`.
+
+Mint and melt quote lookups use `QuoteIdentity`, the methodless object shape
+`{ mintUrl, quoteId }`:
+
+```ts
+const mintIdentity = { mintUrl: mintQuote.mintUrl, quoteId: mintQuote.quoteId };
+
+await manager.quotes.mint.get(mintIdentity);
+await manager.quotes.mint.refresh(mintIdentity);
+await manager.ops.mint.listByQuote(mintIdentity);
+
+const meltIdentity = { mintUrl: meltQuote.mintUrl, quoteId: meltQuote.quoteId };
+
+await manager.quotes.melt.get(meltIdentity);
+await manager.quotes.melt.refresh(meltIdentity);
+await manager.ops.melt.getByQuote(meltIdentity);
+await manager.ops.melt.listByQuote(meltIdentity);
+```
+
+Operation preparation accepts structural quote refs. `MintQuoteRef` and
+`MeltQuoteRef` are `{ mintUrl, quoteId, method }`, and full canonical quote
+objects already satisfy those types. Mint prepare uses
+`prepare({ quote, amount })`; BOLT melt prepare uses `prepare({ quote })`; and
+onchain melt prepare uses `prepare({ quote, feeIndex })`. Public operation
+prepare inputs do not accept sibling `unit`, `method`, or `methodData` fields;
+those details are derived from canonical quote storage.
+
+### MintApi
+
+- `addMint(mintUrl: string, options?: { trusted?: boolean }): Promise<{ mint: Mint; keysets: Keyset[] }>`
+- `getMintInfo(mintUrl: string): Promise<MintInfo>`
+- `isTrustedMint(mintUrl: string): Promise<boolean>`
+- `getAllMints(): Promise<Mint[]>`
+- `getAllTrustedMints(): Promise<Mint[]>`
+- `trustMint(mintUrl: string): Promise<void>`
+- `untrustMint(mintUrl: string): Promise<void>`
+
+### WalletApi
+
+- `receive(token: Token | string): Promise<void>`
+- `balances.byMint(scope?: { mintUrls?: string[]; units?: string[]; trustedOnly?: boolean }): Promise<BalancesByMint>`
+- `balances.byMintAndUnit(scope?: { mintUrls?: string[]; units?: string[]; trustedOnly?: boolean }): Promise<BalancesByMintAndUnit>`
+- `balances.byUnit(scope?: { mintUrls?: string[]; units?: string[]; trustedOnly?: boolean }): Promise<BalancesByUnit>`
+- `balances.total(scope?: { mintUrls?: string[]; units?: string[]; trustedOnly?: boolean }): Promise<BalanceSnapshot>`
+- `balances.totalByUnit(scope?: { mintUrls?: string[]; units?: string[]; trustedOnly?: boolean }): Promise<BalancesByUnit>`
+- `restore(mintUrl: string, options?: { units?: string[] }): Promise<void>`
+- `sweep(mintUrl: string, bip39seed: Uint8Array, options?: { units?: string[] }): Promise<void>`
+- `decodeToken(tokenString: string, mintUrl?: string): Promise<Token>`
+- `encodeToken(token: Token, opts?: { removeDleq?: boolean }): string`
+- `encodePaymentRequest(paymentRequest: PaymentRequest, version?: 'creqA' | 'creqB'): string`
+
+### AuthApi
+
+- `startDeviceAuth(mintUrl: string)`
+- `login(mintUrl, tokens): Promise<AuthSession>`
+- `restore(mintUrl): Promise<boolean>`
+- `logout(mintUrl): Promise<void>`
+- `getSession(mintUrl): Promise<AuthSession>`
+- `hasSession(mintUrl): Promise<boolean>`
+- `getAuthProvider(mintUrl): AuthProvider | undefined`
+- `getPoolSize(mintUrl): number`
+
+### PaymentRequestsApi
+
+- `parse(paymentRequest: string): Promise<ResolvedPaymentRequest>`
+- `prepare(request: ResolvedPaymentRequest, options: { mintUrl: string; amount?: AmountLike }): Promise<PreparedPaymentRequest>`
+- `execute(transaction: PreparedPaymentRequest): Promise<PaymentRequestExecutionResult>`
+- `incoming.create(input: CreateIncomingPaymentRequestInput): Promise<PaymentRequestReceiveOperation>`
+
+### QuoteApi
+
+- `mint.create(...)`, `mint.import(...)`, `mint.get({ mintUrl, quoteId })`
+- `mint.listPending({ method? })`, `mint.refresh({ mintUrl, quoteId })`
+- `melt.create(...)`, `melt.get({ mintUrl, quoteId })`
+- `melt.listPending({ method? })`, `melt.refresh({ mintUrl, quoteId })`
+
+Quote refreshes persist canonical quote snapshots before emitting
+`mint-quote:updated` or `melt-quote:updated`. Use `manager.on(...)` for live
+application flows and operation APIs when a mint or melt should be finalized.
+
+### HistoryApi
+
+- `getPaginatedHistory(offset?: number, limit?: number): Promise<HistoryEntry[]>`
+- `getHistoryEntryById(id: string): Promise<HistoryEntry | null>`
+- `getOperationIdForHistoryEntry(id: string): Promise<string | null>`
+
+### KeyRingApi
+
+- `generateKeyPair(dumpSecretKey?: boolean): Promise<{ publicKeyHex: string } | Keypair>`
+- `addKeyPair(secretKey: Uint8Array): Promise<Keypair>`
+- `removeKeyPair(publicKey: string): Promise<void>`
+- `getKeyPair(publicKey: string): Promise<Keypair | null>`
+- `getLatestKeyPair(): Promise<Keypair | null>`
+- `getAllKeyPairs(): Promise<Keypair[]>`
+
+### Subscriptions in Node vs browser
+
+`Manager` will auto-detect a global `WebSocket` if available (e.g., browsers).
+In non-browser environments, provide a `webSocketFactory` through
+`initializeCoco` or `Manager` construction. App code should not need transport
+internals.
+
+## Core events
+
+See the `CoreEvents` type for the full, current event map. Common events
+include:
+
+- `mint:added` → `{ mint, keysets }`
+- `mint:updated` → `{ mint, keysets }`
+- `mint:trusted` → `{ mintUrl }`
+- `mint:untrusted` → `{ mintUrl }`
+- `counter:updated` → `Counter`
+- `proofs:saved` → `{ mintUrl, keysetId, proofs }`
+- `proofs:state-changed` → `{ mintUrl, secrets, state }`
+- `proofs:deleted` → `{ mintUrl, secrets }`
+- `proofs:wiped` → `{ mintUrl, keysetId }`
+- `proofs:reserved` → `{ mintUrl, operationId, secrets, amount }`
+- `proofs:released` → `{ mintUrl, secrets }`
+- `mint-quote:updated` → `{ mintUrl, method, quoteId, quote }`
+- `melt-quote:updated` → `{ mintUrl, method, quoteId, quote }`
+- `mint-op:pending` → `{ mintUrl, operationId, operation }`
+- `mint-op:requeue` → `{ mintUrl, operationId, operation }`
+- `mint-op:executing` → `{ mintUrl, operationId, operation }`
+- `mint-op:finalized` → `{ mintUrl, operationId, operation }`
+- `mint-op:failed` → `{ mintUrl, operationId, operation }`
+- `send:prepared` → `{ mintUrl, operationId, operation }`
+- `send:pending` → `{ mintUrl, operationId, operation, token }`
+- `send:finalized` → `{ mintUrl, operationId, operation }`
+- `send:rolled-back` → `{ mintUrl, operationId, operation }`
+- `receive-op:prepared` → `{ mintUrl, operationId, operation }`
+- `receive-op:finalized` → `{ mintUrl, operationId, operation }`
+- `receive-op:rolled-back` → `{ mintUrl, operationId, operation }`
+- `history:updated` → `{ mintUrl, entry }`
+- `melt-op:prepared` → `{ mintUrl, operationId, operation }`
+- `melt-op:pending` → `{ mintUrl, operationId, operation }`
+- `melt-op:finalized` → `{ mintUrl, operationId, operation }`
+- `melt-op:rolled-back` → `{ mintUrl, operationId, operation }`
+- `subscriptions:paused` / `subscriptions:resumed`
+- `auth-session:updated` / `auth-session:deleted` / `auth-session:expired`
+
+## Plugins
+
+### Overview
+
+- **Purpose**: Extend the core by hooking into lifecycle events with access only to the services you declare.
+- **Lifecycle hooks**: `onInit` (after services are created), `onReady` (after APIs are built), `onDispose` (on shutdown).
+- **Cleanup**: Hooks must return a cleanup function (sync or async), similar to React’s `useEffect`.
+
+### Types
+
+```ts
+import type { Plugin, ServiceKey } from '@cashu/coco-core/plugin';
+
+// Service keys are derived from the exported plugin ServiceMap type.
+// Use ServiceKey when you want the current full set without duplicating it here.
+
+const myPlugin: Plugin<['eventBus', 'logger']> = {
+  name: 'my-plugin',
+  required: ['eventBus', 'logger'] as const,
+  onInit: ({ services: { eventBus, logger } }) => {
+    const off = eventBus.on('mint:added', (p) => logger.info('mint added', p));
+    return off;
+  },
+  onReady: async () => {
+    // optional
+  },
+  onDispose: () => {
+    // optional
+  },
+};
+```
+
+Plugins that ingest externally created mint quotes can request the canonical
+quote API:
+
+```ts
+const quotePlugin: Plugin<['quotes']> = {
+  name: 'quote-plugin',
+  required: ['quotes'] as const,
+  onReady: async ({ services }) => {
+    await services.quotes.mint.import({
+      mintUrl,
+      method: 'bolt11',
+      quote,
+    });
+  },
+};
+```
+
+### Using plugins
+
+```ts
+// Pass plugins at construction
+const manager = new Manager(repos, seedGetter, logger, undefined, [myPlugin]);
+
+// Or register later
+manager.use(myPlugin);
+
+// Dispose (runs onDispose and registered cleanups)
+await manager.dispose();
+```
+
+### Error handling
+
+- Errors thrown in `onInit`, `onReady`, and `onDispose` are caught. Hook errors are logged with the plugin name; a failure during plugin boot is also logged by the injected `Logger`.
+
+## Exports
+
+From the package root (`@cashu/coco-core`), for app and React usage:
+
+- `Manager`, `initializeCoco`, `CocoConfig`
+- `MemoryRepositories`
+- Public APIs including `MintApi`, `WalletApi`, `AuthApi`, `PaymentRequestsApi`,
+  `QuoteApi`, and the operation-oriented APIs
+- Public models, errors, API inputs/results, and operation result types
+- Events: `CoreEvents`, `EventHandler`
+- Types: `CoreProof`, `ProofState`, `BalanceQuery`, `BalanceSnapshot`,
+  `BalancesByMint`, `BalanceBreakdown`, `BalancesBreakdownByMint`
+- Logging: `ConsoleLogger`, `Logger`
+- Helpers: `getEncodedToken`, `getDecodedToken`, `normalizeMintUrl`
+- Amount/unit helpers and intentional `@cashu/cashu-ts` re-exports such as `Amount`
+- Config boundary types: `WebSocketLike`, `WebSocketFactory`
+
+From the adapter subpath (`@cashu/coco-core/adapter`), for storage adapter
+implementations and adapter contract tests:
+
+- Repository contracts, transaction scope types, persisted operation/domain types, and
+  adapter serialization helpers for storage implementations
+
+From the plugin subpath (`@cashu/coco-core/plugin`), for extension authors:
+
+- Plugin author types: `Plugin`, `PluginContext`, `PluginExtensions`, `PluginEventBus`,
+  `ServiceKey`, `ServiceMap`, `Cleanup`, `CleanupFn`
+- Plugin errors: `DuplicatePluginRegistrationError`, `ExtensionRegistrationError`
+
+The package root (`@cashu/coco-core`) is the supported public import path unless
+`package.json` explicitly lists a subpath export. Documented public symbols must be
+reachable from the root or from a listed subpath. Internal barrels such as source
+folder indexes are private unless the export map and docs explicitly make them public.

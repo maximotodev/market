@@ -8,6 +8,7 @@ import { Store } from '@tanstack/store'
 import { configStore } from './config'
 import { nip60Actions } from './nip60'
 import { walletActions, walletStore, type Wallet } from './wallet'
+import { isCocoAuctionDemoMode } from '@/lib/coco/auctionDemo/mode'
 
 /**
  * Connection health, derived from pool events + the watchdog.
@@ -742,13 +743,15 @@ export const ndkActions = {
 		await Promise.all([
 			ndkActions.loadRelaysFromNostr().catch((e) => console.error('[ndk] loadRelaysFromNostr failed:', e)),
 			ndkActions.selectAndSetInitialNwcWallet().catch((e) => console.error('[ndk] selectAndSetInitialNwcWallet failed:', e)),
-			(async () => {
-				try {
-					await nip60Actions.initialize(userPubkey)
-				} catch (e) {
-					console.error('[ndk] nip60Actions.initialize failed:', e)
-				}
-			})(),
+			isCocoAuctionDemoMode()
+				? Promise.resolve()
+				: (async () => {
+						try {
+							await nip60Actions.initialize(userPubkey)
+						} catch (e) {
+							console.error('[ndk] nip60Actions.initialize failed:', e)
+						}
+					})(),
 		])
 	},
 

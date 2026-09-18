@@ -1,0 +1,8 @@
+{
+	"cocoCommit": "190b25b0c16eb6ebbb42e1d67a0d28399c641ae1",
+	"cashuTsVersion": "5.0.0-rc.4",
+	"bunVersion": "1.3.11",
+	"buildCommand": "COCO_SOURCE=/path/to/coco bash scripts/build-frozen-coco-runtime.sh",
+	"coreArtifactSha256": "81ee511643899f06d1c99b43f8a8ca59a977354e64b078fed5a8c867ceb1bd33",
+	"indexedDbArtifactSha256": "ed94196bdbe7bbe02f9f295d13776540a15692edf2d53907215146da237bc454"
+}

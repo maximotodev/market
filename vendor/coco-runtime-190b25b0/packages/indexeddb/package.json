@@ -1,0 +1,47 @@
+{
+	"name": "@cashu/coco-indexeddb",
+	"version": "2.0.0",
+	"main": "dist/index.js",
+	"module": "dist/index.js",
+	"types": "dist/index.d.ts",
+	"type": "module",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/cashubtc/coco",
+		"directory": "packages/indexeddb"
+	},
+	"files": [
+		"dist",
+		"README.md"
+	],
+	"devDependencies": {
+		"@vitest/browser": "^3.2.4",
+		"@cashu/coco-adapter-tests": "2.0.0",
+		"playwright": "^1.52.0",
+		"vitest": "^3.2.4"
+	},
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		},
+		"./runtime-probe": {
+			"types": "./runtime-probe.d.ts",
+			"import": "./runtime-probe.js"
+		}
+	},
+	"dependencies": {
+		"dexie": "^4.0.8"
+	},
+	"scripts": {
+		"build": "tsdown",
+		"typecheck": "tsc --noEmit",
+		"test": "bun test",
+		"test:browser": "vitest run"
+	},
+	"peerDependencies": {
+		"@cashu/cashu-ts": "5.0.0-rc.4",
+		"typescript": "^5",
+		"@cashu/coco-core": "2.0.0"
+	}
+}
